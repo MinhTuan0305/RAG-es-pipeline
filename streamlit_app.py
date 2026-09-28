@@ -1,3 +1,4 @@
+import os
 import tempfile
 from pathlib import Path
 
@@ -138,12 +139,20 @@ with tab_upload:
             tmp.write(uploaded_file.getvalue())
             tmp_path = tmp.name
 
-        with st.spinner("Đang phân tích cấu trúc tài liệu (unstructured)..."):
+        try:
+            with st.spinner("Đang phân tích cấu trúc tài liệu (unstructured)..."):
+                try:
+                    result = ingest_document(tmp_path, uploaded_file.name)
+                except Exception as e:
+                    st.error(f"Không phân tích được tài liệu: {e}")
+                    result = None
+        finally:
+            # ingest_document only needs the file on disk during parsing -- always
+            # clean up the temp file afterward, even if parsing raised.
             try:
-                result = ingest_document(tmp_path, uploaded_file.name)
-            except Exception as e:
-                st.error(f"Không phân tích được tài liệu: {e}")
-                result = None
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
         if result is not None:
             if not result["tree"]["children"] and not result["tree"]["paragraphs"]:
