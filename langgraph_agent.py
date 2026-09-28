@@ -55,6 +55,14 @@ def extract_text(content) -> str:
     return str(content)
 
 
+# bge-reranker-v2-m3 with normalize=True outputs a sigmoid score in [0, 1]. Chunks
+# scoring below this are treated as "not actually relevant" and withheld from the
+# LLM (rather than trusting the prompt alone to notice weak context and not
+# hallucinate). Tune this based on observed scores -- genuinely relevant Gatsby
+# passages in testing scored ~0.3-0.8, so 0.2 leaves some margin without being so
+# strict that borderline-but-useful matches get discarded.
+MIN_RELEVANCE_SCORE = 0.2
+
 SYSTEM_PROMPT = """Bạn là trợ lý trả lời câu hỏi dựa trên kho tài liệu đã được index trong hệ thống -- kho này có thể chứa nhiều tài liệu khác nhau (sách, báo cáo, tài liệu,...), không chỉ riêng một cuốn.
 
 Bạn có 1 công cụ: `search_documents`, dùng để tìm các đoạn trích liên quan trong toàn bộ kho tài liệu. Quy tắc:
@@ -73,9 +81,9 @@ class GatsbyAgent:
 
     Construct once (heavy: builds the LLM + graph), reuse `.ask()`/`.stream()` for
     every query. Not thread-safe for truly concurrent requests -- `last_sources`/
-    `last_calls` are shared mutable state reset at the start of each call, which is
-    fine for a single-user local app but would need per-request scoping for a
-    multi-user deployment.
+    `last_calls`/`_seen_chunk_ids` are shared mutable state reset at the start of each
+    call, which is fine for a single-user local app but would need per-request scoping
+    for a multi-user deployment.
     """
 
     def __init__(self, es, embed_model, reranker, google_api_key=None, model=GEMINI_MODEL):
@@ -91,6 +99,12 @@ class GatsbyAgent:
         # show proper source citations -- are collected here as a side channel instead.
         self.last_sources: list = []
         self.last_calls: list = []
+        # Tracks chunk_ids already surfaced in this ask()/stream() call. When the agent
+        # splits a question into several search_documents calls, the same chunk can
+        # legitimately match more than one sub-query -- without this, it would show up
+        # twice in the citation list AND get sent to the LLM twice (wasting context
+        # tokens on a passage it already has in the conversation history).
+        self._seen_chunk_ids: set = set()
 
         @tool
         def search_documents(query: str) -> str:
@@ -100,9 +114,36 @@ class GatsbyAgent:
             reformulated or narrower query if the first result does not fully answer
             the question."""
             results = search(es, embed_model, reranker, query, final_top_n=5)
-            self.last_calls.append({"query": query, "num_hits": len(results)})
-            self.last_sources.extend(results)
-            return build_context(results)
+
+            new_results = [
+                c for c in results
+                if c["hit"]["_source"]["chunk_id"] not in self._seen_chunk_ids
+            ]
+            # Only chunks that clear the relevance bar are marked "seen" and cited --
+            # a chunk that's weak for THIS sub-query is left eligible to be picked up
+            # again by a later, differently-worded sub-query where it might score well.
+            relevant_results = [c for c in new_results if c["rerank_score"] >= MIN_RELEVANCE_SCORE]
+            for c in relevant_results:
+                self._seen_chunk_ids.add(c["hit"]["_source"]["chunk_id"])
+
+            self.last_calls.append({
+                "query": query,
+                "num_hits": len(new_results),
+                "num_relevant": len(relevant_results),
+            })
+            self.last_sources.extend(relevant_results)
+
+            if not new_results:
+                return "(Không có đoạn mới nào -- các đoạn khớp với truy vấn này đã được tìm thấy ở lần tìm kiếm trước.)"
+            if not relevant_results:
+                top_score = max(c["rerank_score"] for c in new_results)
+                return (
+                    "(Không tìm thấy đoạn nào đủ liên quan trong kho tài liệu cho truy vấn này -- "
+                    f"điểm liên quan cao nhất chỉ đạt {top_score:.2f}/1.0, dưới ngưỡng tin cậy "
+                    f"({MIN_RELEVANCE_SCORE}). Hãy báo cho người dùng là không tìm thấy thông tin này "
+                    "trong kho tài liệu, đừng suy đoán hay dùng kiến thức ngoài.)"
+                )
+            return build_context(relevant_results)
 
         llm = ChatGoogleGenerativeAI(model=model, temperature=0.2, google_api_key=api_key)
         llm_with_tools = llm.bind_tools([search_documents])
@@ -132,6 +173,7 @@ class GatsbyAgent:
         """Non-streaming: run the full agent loop, return (answer, sources, tool_calls)."""
         self.last_sources = []
         self.last_calls = []
+        self._seen_chunk_ids = set()
 
         result = self.graph.invoke(self._initial_state(query_text))
         final_answer = extract_text(result["messages"][-1].content)
@@ -146,6 +188,7 @@ class GatsbyAgent:
         """
         self.last_sources = []
         self.last_calls = []
+        self._seen_chunk_ids = set()
 
         for step in self.graph.stream(self._initial_state(query_text), stream_mode="updates"):
             for node_name, node_output in step.items():
@@ -169,7 +212,7 @@ if __name__ == "__main__":
         print("\nAnswer:\n", answer)
         print(f"\nsearch_documents was called {len(tool_calls)} time(s):")
         for i, call in enumerate(tool_calls, start=1):
-            print(f"  {i}. query={call['query']!r} -> {call['num_hits']} hits")
+            print(f"  {i}. query={call['query']!r} -> {call['num_hits']} hits, {call['num_relevant']} relevant")
         print(f"\nTotal source hits across all calls ({len(sources)}):")
         for c in sources:
             src = c["hit"]["_source"]

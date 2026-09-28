@@ -77,8 +77,12 @@ with tab_ask:
                                 # An AIMessage with no tool_calls is the agent's final answer.
                                 final_answer = extract_text(msg.content)
                         elif node == "tools" and agent.last_calls:
-                            n_hits = agent.last_calls[-1]["num_hits"]
-                            st.write(f"　　↳ tìm thấy {n_hits} đoạn liên quan")
+                            last_call = agent.last_calls[-1]
+                            n_hits, n_relevant = last_call["num_hits"], last_call["num_relevant"]
+                            if n_relevant == 0 and n_hits > 0:
+                                st.write(f"　　↳ tìm thấy {n_hits} đoạn nhưng không đủ liên quan (bị lọc bỏ)")
+                            else:
+                                st.write(f"　　↳ tìm thấy {n_hits} đoạn, {n_relevant} đoạn đủ liên quan")
             except Exception as e:
                 had_error = True
                 status.update(label="Có lỗi xảy ra", state="error")
