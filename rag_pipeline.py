@@ -10,7 +10,7 @@ from google.genai import types
 load_dotenv()  # reads .env in the working directory into os.environ, if present
 
 ES_HOST = "http://localhost:9200"
-INDEX_NAME = "gatsby-chunks"
+INDEX_NAME = "document-chunks"
 
 EMBED_MODEL_NAME = "BAAI/bge-m3"
 RERANKER_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
