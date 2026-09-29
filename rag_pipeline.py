@@ -109,24 +109,55 @@ def embed_query(embed_model, query_text):
     return dense_vec, sparse_weights
 
 
-def knn_search(es, query_vector, k=20, num_candidates=100):
+def list_documents(es):
+    """All documents currently in the index: [{book_id, book_title, num_chunks}, ...]."""
     resp = es.search(
         index=INDEX_NAME,
-        knn={"field": "embedding", "query_vector": query_vector, "k": k, "num_candidates": num_candidates},
-        source=SOURCE_EXCLUDES,
+        size=0,
+        aggs={
+            "docs": {
+                "terms": {"field": "book_id", "size": 1000},
+                "aggs": {"title": {"terms": {"field": "book_title.keyword", "size": 1}}},
+            }
+        },
     )
+    docs = []
+    for bucket in resp["aggregations"]["docs"]["buckets"]:
+        title_buckets = bucket["title"]["buckets"]
+        docs.append({
+            "book_id": bucket["key"],
+            "book_title": title_buckets[0]["key"] if title_buckets else bucket["key"],
+            "num_chunks": bucket["doc_count"],
+        })
+    return sorted(docs, key=lambda d: d["book_title"].lower())
+
+
+def knn_search(es, query_vector, k=20, num_candidates=100, book_id=None):
+    knn = {"field": "embedding", "query_vector": query_vector, "k": k, "num_candidates": num_candidates}
+    if book_id:
+        # Filter inside the knn clause (pre-filtering) so we still get k hits from
+        # that document, instead of taking the global top-k and discarding most of it.
+        knn["filter"] = {"term": {"book_id": book_id}}
+    resp = es.search(index=INDEX_NAME, knn=knn, source=SOURCE_EXCLUDES)
     return resp["hits"]["hits"]
 
 
-def sparse_search(es, sparse_weights, size=20, top_n_tokens=32):
+def sparse_search(es, sparse_weights, size=20, top_n_tokens=32, book_id=None):
     top_tokens = sorted(sparse_weights.items(), key=lambda kv: -kv[1])[:top_n_tokens]
     should_clauses = [
         {"rank_feature": {"field": f"sparse_embedding.{token}", "boost": weight}}
         for token, weight in top_tokens
     ]
+    bool_query = {"should": should_clauses}
+    if book_id:
+        bool_query["filter"] = [{"term": {"book_id": book_id}}]
+        # Once a bool has a filter clause, should clauses become optional by default,
+        # which would match every chunk of the document with score 0. Require at
+        # least one token to actually match.
+        bool_query["minimum_should_match"] = 1
     resp = es.search(
         index=INDEX_NAME,
-        query={"bool": {"should": should_clauses}},
+        query={"bool": bool_query},
         size=size,
         source=SOURCE_EXCLUDES,
     )
@@ -142,19 +173,23 @@ def reciprocal_rank_fusion(result_lists, k=60):
     return sorted(fused.values(), key=lambda e: -e["rrf_score"])
 
 
-def hybrid_retrieve(es, embed_model, query_text, dense_k=20, sparse_k=20, fused_top_n=20):
+def hybrid_retrieve(es, embed_model, query_text, dense_k=20, sparse_k=20, fused_top_n=20, book_id=None):
     dense_vec, sparse_weights = embed_query(embed_model, query_text)
 
-    dense_hits = knn_search(es, dense_vec, k=dense_k, num_candidates=dense_k * 5)
-    sparse_hits = sparse_search(es, sparse_weights, size=sparse_k)
+    dense_hits = knn_search(es, dense_vec, k=dense_k, num_candidates=dense_k * 5, book_id=book_id)
+    sparse_hits = sparse_search(es, sparse_weights, size=sparse_k, book_id=book_id)
 
     fused = reciprocal_rank_fusion([dense_hits, sparse_hits])
     return fused[:fused_top_n]
 
 
 def rerank(reranker, query_text, candidates, top_n=5):
+    if not candidates:
+        return []
     pairs = [[query_text, c["hit"]["_source"]["text"]] for c in candidates]
     scores = reranker.compute_score(pairs, normalize=True, max_length=1024)
+    if not isinstance(scores, list):
+        scores = [scores]  # compute_score returns a bare float for a single pair
 
     for c, score in zip(candidates, scores):
         c["rerank_score"] = score
@@ -195,8 +230,11 @@ Trả lời:"""
     return response.text
 
 
-def search(es, embed_model, reranker, query_text, dense_k=20, sparse_k=20, fused_top_n=20, final_top_n=5):
-    fused = hybrid_retrieve(es, embed_model, query_text, dense_k=dense_k, sparse_k=sparse_k, fused_top_n=fused_top_n)
+def search(es, embed_model, reranker, query_text, dense_k=20, sparse_k=20, fused_top_n=20, final_top_n=5, book_id=None):
+    fused = hybrid_retrieve(
+        es, embed_model, query_text,
+        dense_k=dense_k, sparse_k=sparse_k, fused_top_n=fused_top_n, book_id=book_id,
+    )
     return rerank(reranker, query_text, fused, top_n=final_top_n)
 
 

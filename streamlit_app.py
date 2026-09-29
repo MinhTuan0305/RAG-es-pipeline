@@ -11,6 +11,7 @@ from rag_pipeline import (
     embed_chunks_batch,
     ensure_index_exists,
     index_chunks,
+    list_documents,
     load_embed_model,
     load_es_client,
     load_reranker,
@@ -41,6 +42,12 @@ def get_agent():
     return GatsbyAgent(get_es_client(), get_embed_model(), get_reranker())
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def get_document_list(_es):
+    # Leading underscore: tells st.cache_data not to try hashing the ES client.
+    return list_documents(_es)
+
+
 try:
     agent = get_agent()
 except Exception as e:
@@ -51,8 +58,23 @@ except Exception as e:
 tab_ask, tab_upload = st.tabs(["💬 Hỏi đáp", "📤 Thêm tài liệu mới"])
 
 with tab_ask:
+    try:
+        documents = get_document_list(get_es_client())
+    except Exception as e:
+        st.warning(f"Không lấy được danh sách tài liệu, sẽ tìm trên toàn bộ kho: {e}")
+        documents = []
+
+    selected_doc = st.selectbox(
+        "Phạm vi tìm kiếm",
+        options=[None] + documents,
+        format_func=lambda d: (
+            f"Tất cả tài liệu ({len(documents)})" if d is None
+            else f"{d['book_title']} ({d['num_chunks']} chunk)"
+        ),
+    )
+
     query_text = st.text_input(
-        "Đặt câu hỏi về nội dung sách:",
+        "Đặt câu hỏi:",
         placeholder="What does the green light symbolize?",
     )
 
@@ -60,10 +82,12 @@ with tab_ask:
         step_num = 0
         final_answer = None
         had_error = False
+        book_id = selected_doc["book_id"] if selected_doc else None
+        book_title = selected_doc["book_title"] if selected_doc else None
 
         with st.status("Agent đang suy luận...", expanded=True) as status:
             try:
-                for event in agent.stream(query_text):
+                for event in agent.stream(query_text, book_id=book_id, book_title=book_title):
                     node = event["node"]
                     for msg in event["messages"]:
                         if node == "agent":
@@ -98,9 +122,12 @@ with tab_ask:
                 for i, c in enumerate(agent.last_sources):
                     src = c["hit"]["_source"]
                     text = src["text"]
+                    location = f"Chapter {src['chapter_title']}"
+                    if src.get("section_title"):
+                        location += f" > {src['section_title']}"
                     st.markdown(
-                        f"**{src['chunk_id']}** (Chapter {src['chapter_title']}, "
-                        f"rerank score={c['rerank_score']:.4f})"
+                        f"**{src['book_title']}** — {location}  \n"
+                        f"`{src['chunk_id']}` · rerank score={c['rerank_score']:.4f}"
                     )
                     is_long = len(text) > 300
                     st.caption(text[:300] + ("..." if is_long else ""))
@@ -223,6 +250,7 @@ with tab_upload:
                             )
                             del st.session_state["pending_tree"]
                             del st.session_state["pending_metadata"]
+                            get_document_list.clear()  # new doc should appear in the picker right away
                     except Exception as e:
                         status.update(label="Có lỗi xảy ra", state="error")
                         st.error(f"Có lỗi xảy ra: {e}")

@@ -105,6 +105,9 @@ class GatsbyAgent:
         # twice in the citation list AND get sent to the LLM twice (wasting context
         # tokens on a passage it already has in the conversation history).
         self._seen_chunk_ids: set = set()
+        # Document scope for the current call (None = whole library). Chosen by the
+        # user in the UI, not by the LLM, so it's not a tool argument.
+        self._book_id = None
 
         @tool
         def search_documents(query: str) -> str:
@@ -113,7 +116,7 @@ class GatsbyAgent:
             this to look up specific details, quotes, or context. Call it again with a
             reformulated or narrower query if the first result does not fully answer
             the question."""
-            results = search(es, embed_model, reranker, query, final_top_n=5)
+            results = search(es, embed_model, reranker, query, final_top_n=5, book_id=self._book_id)
 
             new_results = [
                 c for c in results
@@ -161,36 +164,42 @@ class GatsbyAgent:
 
         self.graph = graph_builder.compile()
 
-    def _initial_state(self, query_text: str):
-        return {
-            "messages": [
-                SystemMessage(content=SYSTEM_PROMPT),
-                HumanMessage(content=query_text),
-            ]
-        }
-
-    def ask(self, query_text: str):
-        """Non-streaming: run the full agent loop, return (answer, sources, tool_calls)."""
+    def _reset(self, book_id):
         self.last_sources = []
         self.last_calls = []
         self._seen_chunk_ids = set()
+        self._book_id = book_id
 
-        result = self.graph.invoke(self._initial_state(query_text))
+    def _initial_state(self, query_text: str, book_title=None):
+        messages = [SystemMessage(content=SYSTEM_PROMPT)]
+        if book_title:
+            messages.append(SystemMessage(content=(
+                f'Phạm vi tìm kiếm của câu hỏi này đã được giới hạn trong tài liệu "{book_title}". '
+                "Mọi kết quả `search_documents` trả về đều chỉ thuộc tài liệu này."
+            )))
+        messages.append(HumanMessage(content=query_text))
+        return {"messages": messages}
+
+    def ask(self, query_text: str, book_id=None, book_title=None):
+        """Non-streaming: run the full agent loop, return (answer, sources, tool_calls).
+        book_id=None searches the whole library; otherwise only that document."""
+        self._reset(book_id)
+
+        result = self.graph.invoke(self._initial_state(query_text, book_title))
         final_answer = extract_text(result["messages"][-1].content)
         return final_answer, list(self.last_sources), list(self.last_calls)
 
-    def stream(self, query_text: str):
+    def stream(self, query_text: str, book_id=None, book_title=None):
         """Streaming: yields one {"node": "agent"|"tools", "messages": [...]} event per
         graph step, in order, as the agent decomposes/searches/reasons -- for live
         display of "how the LLM broke down the query" instead of only the final answer.
         After the generator is exhausted, self.last_sources/self.last_calls hold the
         full accumulated results for this call, same as after `.ask()`.
+        book_id=None searches the whole library; otherwise only that document.
         """
-        self.last_sources = []
-        self.last_calls = []
-        self._seen_chunk_ids = set()
+        self._reset(book_id)
 
-        for step in self.graph.stream(self._initial_state(query_text), stream_mode="updates"):
+        for step in self.graph.stream(self._initial_state(query_text, book_title), stream_mode="updates"):
             for node_name, node_output in step.items():
                 yield {"node": node_name, "messages": node_output["messages"]}
 
