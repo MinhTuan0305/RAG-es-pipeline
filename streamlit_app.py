@@ -15,7 +15,7 @@ from chat_store import (
 )
 from chunking import build_chunk_records, get_tokenizer
 from document_ingest import SUPPORTED_EXTENSIONS, ingest_document, tree_to_book
-from langgraph_agent import DocumentQAAgent, extract_text
+from langgraph_agent import DocumentQAAgent, RunContext, extract_text
 from rag_pipeline import (
     embed_chunks_batch,
     ensure_index_exists,
@@ -267,8 +267,13 @@ if page == PAGE_CHAT:
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        book_id = selected_doc["book_id"] if selected_doc else None
-        book_title = selected_doc["book_title"] if selected_doc else None
+        # Per-question state: this run's scope plus everything its searches find.
+        # Owned by this session alone, so other users/tabs asking at the same time
+        # can't overwrite it (the agent object itself is shared across sessions).
+        run = RunContext(
+            book_id=selected_doc["book_id"] if selected_doc else None,
+            book_title=selected_doc["book_title"] if selected_doc else None,
+        )
 
         with st.chat_message("assistant"):
             # Created in this order so the step log sits above the streaming answer.
@@ -277,33 +282,37 @@ if page == PAGE_CHAT:
             streamed_text = ""
             final_answer = None
             step_num = 0
+            shown_calls = 0
 
             try:
-                for event in agent.stream(prompt, book_id=book_id, book_title=book_title, history=history):
+                for event in agent.stream(prompt, run, history=history):
                     if event["type"] == "token":
                         streamed_text += event["text"]
                         answer_placeholder.markdown(streamed_text + "▌")
                         continue
 
-                    node = event["node"]
+                    if event["node"] == "tools":
+                        # One "tools" step can contain several searches (the LLM may
+                        # request them in parallel) -- report each one exactly once.
+                        for call in run.calls[shown_calls:]:
+                            status.write(f"　　↳ _{call['query']!r}_: tìm thấy {call['num_hits']} đoạn liên quan")
+                        shown_calls = len(run.calls)
+                        continue
+
                     for msg in event["messages"]:
-                        if node == "agent":
-                            tool_calls = getattr(msg, "tool_calls", None) or []
-                            if tool_calls:
-                                # Any text streamed during this turn was a preamble before
-                                # a tool call, not the answer -- drop it.
-                                streamed_text = ""
-                                answer_placeholder.empty()
-                                for tc in tool_calls:
-                                    step_num += 1
-                                    sub_query = tc["args"].get("query", "")
-                                    status.write(f"**Bước {step_num}** — 🔍 LLM quyết định tìm kiếm: _{sub_query!r}_")
-                            elif msg.content:
-                                # An AIMessage with no tool_calls is the agent's final answer.
-                                final_answer = extract_text(msg.content)
-                        elif node == "tools" and agent.last_calls:
-                            n_hits = agent.last_calls[-1]["num_hits"]
-                            status.write(f"　　↳ tìm thấy {n_hits} đoạn liên quan")
+                        tool_calls = getattr(msg, "tool_calls", None) or []
+                        if tool_calls:
+                            # Any text streamed during this turn was a preamble before
+                            # a tool call, not the answer -- drop it.
+                            streamed_text = ""
+                            answer_placeholder.empty()
+                            for tc in tool_calls:
+                                step_num += 1
+                                sub_query = tc["args"].get("query", "")
+                                status.write(f"**Bước {step_num}** — 🔍 LLM quyết định tìm kiếm: _{sub_query!r}_")
+                        elif msg.content:
+                            # An AIMessage with no tool_calls is the agent's final answer.
+                            final_answer = extract_text(msg.content)
             except Exception as e:
                 answer_placeholder.empty()
                 status.update(label="Có lỗi xảy ra", state="error", expanded=False)
@@ -320,9 +329,9 @@ if page == PAGE_CHAT:
                 assistant_msg = {
                     "role": "assistant",
                     "content": final_answer,
-                    "tool_calls": list(agent.last_calls),
-                    "sources": to_source_records(agent.last_sources),
-                    "scope": book_title,
+                    "tool_calls": list(run.calls),
+                    "sources": to_source_records(run.sources),
+                    "scope": run.book_title,
                 }
                 render_assistant_extras(assistant_msg)
                 append_message(assistant_msg)

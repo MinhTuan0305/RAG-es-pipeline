@@ -17,9 +17,12 @@ Run directly for debugging, outside Streamlit:
 """
 
 import os
+import threading
+from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, START, MessagesState, StateGraph
@@ -69,14 +72,35 @@ Bạn có 1 công cụ: `search_documents`, dùng để tìm các đoạn trích
 """
 
 
+@dataclass
+class RunContext:
+    """Everything that belongs to ONE question: its search scope, and what its
+    search_documents calls found. A fresh one is created per ask()/stream() call and
+    handed to the tool through LangGraph's per-invocation config, so concurrent
+    questions (other users, other browser tabs) never see or overwrite each other's
+    state -- the agent object itself stays shared and holds no per-question data.
+    """
+
+    book_id: str | None = None      # None = search the whole library
+    book_title: str | None = None   # shown to the LLM so it knows the scope
+    # search_documents must return a plain string (the ToolMessage the LLM reads), so
+    # the raw hits -- needed for source citations -- are collected here instead.
+    sources: list = field(default_factory=list)
+    calls: list = field(default_factory=list)
+    # chunk_ids already returned during this question, so a chunk matching several
+    # sub-queries is neither cited twice nor sent to the LLM twice.
+    seen_chunk_ids: set = field(default_factory=set)
+    # The LLM can request several searches in one turn and ToolNode runs them in
+    # parallel; the lock keeps the dedup check-and-record step atomic between them.
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+
 class DocumentQAAgent:
     """Bundles the compiled LangGraph graph with the resources search_documents needs.
 
-    Construct once (heavy: builds the LLM + graph), reuse `.ask()`/`.stream()` for
-    every query. Not thread-safe for truly concurrent requests -- `last_sources`/
-    `last_calls`/`_seen_chunk_ids` are shared mutable state reset at the start of each
-    call, which is fine for a single-user local app but would need per-request scoping
-    for a multi-user deployment.
+    Construct once (heavy: builds the LLM + graph) and share it freely -- it holds no
+    per-question state, so concurrent `.ask()`/`.stream()` calls are safe. Each call
+    gets its own RunContext.
     """
 
     def __init__(self, es, embed_model, reranker, google_api_key=None, model=GEMINI_MODEL):
@@ -87,39 +111,29 @@ class DocumentQAAgent:
                 "Lấy API key tại https://aistudio.google.com/apikey"
             )
 
-        # search_documents must return a plain string (that's what becomes the
-        # ToolMessage content the LLM reads), so the raw hit objects -- needed later to
-        # show proper source citations -- are collected here as a side channel instead.
-        self.last_sources: list = []
-        self.last_calls: list = []
-        # Tracks chunk_ids already surfaced in this ask()/stream() call. When the agent
-        # splits a question into several search_documents calls, the same chunk can
-        # legitimately match more than one sub-query -- without this, it would show up
-        # twice in the citation list AND get sent to the LLM twice (wasting context
-        # tokens on a passage it already has in the conversation history).
-        self._seen_chunk_ids: set = set()
-        # Document scope for the current call (None = whole library). Chosen by the
-        # user in the UI, not by the LLM, so it's not a tool argument.
-        self._book_id = None
-
         @tool
-        def search_documents(query: str) -> str:
+        def search_documents(query: str, config: RunnableConfig) -> str:
             """Search the indexed document library (which may contain multiple
             different documents/books) for passages relevant to the given query. Use
             this to look up specific details, quotes, or context. Call it again with a
             reformulated or narrower query if the first result does not fully answer
             the question."""
-            results = search(es, embed_model, reranker, query, final_top_n=5, book_id=self._book_id)
+            # `config` is injected by LangGraph and hidden from the LLM -- the model
+            # only ever sees and fills in `query`.
+            ctx: RunContext = config["configurable"]["run_context"]
 
-            new_results = [
-                c for c in results
-                if c["hit"]["_source"]["chunk_id"] not in self._seen_chunk_ids
-            ]
-            for c in new_results:
-                self._seen_chunk_ids.add(c["hit"]["_source"]["chunk_id"])
+            # The search itself runs outside the lock, so parallel searches overlap.
+            results = search(es, embed_model, reranker, query, final_top_n=5, book_id=ctx.book_id)
 
-            self.last_calls.append({"query": query, "num_hits": len(new_results)})
-            self.last_sources.extend(new_results)
+            with ctx.lock:
+                new_results = [
+                    c for c in results
+                    if c["hit"]["_source"]["chunk_id"] not in ctx.seen_chunk_ids
+                ]
+                for c in new_results:
+                    ctx.seen_chunk_ids.add(c["hit"]["_source"]["chunk_id"])
+                ctx.calls.append({"query": query, "num_hits": len(new_results)})
+                ctx.sources.extend(new_results)
 
             if not new_results:
                 return "(Không có đoạn mới nào -- các đoạn khớp với truy vấn này đã được tìm thấy ở lần tìm kiếm trước.)"
@@ -141,11 +155,9 @@ class DocumentQAAgent:
 
         self.graph = graph_builder.compile()
 
-    def _reset(self, book_id):
-        self.last_sources = []
-        self.last_calls = []
-        self._seen_chunk_ids = set()
-        self._book_id = book_id
+    @staticmethod
+    def _run_config(ctx: RunContext):
+        return {"configurable": {"run_context": ctx}}
 
     def _initial_state(self, query_text: str, book_title=None, history=None):
         messages = [SystemMessage(content=SYSTEM_PROMPT)]
@@ -168,13 +180,15 @@ class DocumentQAAgent:
         """Non-streaming: run the full agent loop, return (answer, sources, tool_calls).
         book_id=None searches the whole library; otherwise only that document.
         history: earlier chat turns as [{"role": "user"|"assistant", "content": str}, ...]."""
-        self._reset(book_id)
-
-        result = self.graph.invoke(self._initial_state(query_text, book_title, history))
+        ctx = RunContext(book_id=book_id, book_title=book_title)
+        result = self.graph.invoke(
+            self._initial_state(query_text, ctx.book_title, history),
+            config=self._run_config(ctx),
+        )
         final_answer = extract_text(result["messages"][-1].content)
-        return final_answer, list(self.last_sources), list(self.last_calls)
+        return final_answer, ctx.sources, ctx.calls
 
-    def stream(self, query_text: str, book_id=None, book_title=None, history=None):
+    def stream(self, query_text: str, ctx: RunContext, history=None):
         """Streaming: yields two kinds of events, in order:
 
         - {"type": "token", "text": str} -- a piece of text as the LLM generates it
@@ -186,15 +200,16 @@ class DocumentQAAgent:
           graph step (the full AIMessage with tool_calls/final text, or the tool
           results), for showing how the LLM broke down the query.
 
-        After the generator is exhausted, self.last_sources/self.last_calls hold the
-        full accumulated results for this call, same as after `.ask()`.
-        book_id=None searches the whole library; otherwise only that document.
+        ctx: the caller creates a fresh RunContext(book_id=..., book_title=...) for this
+        question and keeps a reference to it -- ctx.calls / ctx.sources fill up while
+        the generator runs (readable live, e.g. after each "tools" update) and hold the
+        complete results once it's exhausted.
         history: earlier chat turns as [{"role": "user"|"assistant", "content": str}, ...].
         """
-        self._reset(book_id)
-
-        initial_state = self._initial_state(query_text, book_title, history)
-        for mode, payload in self.graph.stream(initial_state, stream_mode=["updates", "messages"]):
+        initial_state = self._initial_state(query_text, ctx.book_title, history)
+        for mode, payload in self.graph.stream(
+            initial_state, config=self._run_config(ctx), stream_mode=["updates", "messages"],
+        ):
             if mode == "messages":
                 chunk, metadata = payload
                 # Only incremental LLM output from the agent node -- skips ToolMessages
