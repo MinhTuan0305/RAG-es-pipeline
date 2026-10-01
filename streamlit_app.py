@@ -4,6 +4,15 @@ from pathlib import Path
 
 import streamlit as st
 
+from chat_store import (
+    add_message,
+    create_conversation,
+    delete_conversation,
+    get_conversation,
+    init_db,
+    list_conversations,
+    load_messages,
+)
 from chunking import build_chunk_records, get_tokenizer
 from document_ingest import SUPPORTED_EXTENSIONS, ingest_document, tree_to_book
 from langgraph_agent import DocumentQAAgent, extract_text
@@ -57,10 +66,51 @@ except Exception as e:
     st.error(f"Không khởi tạo được hệ thống: {e}")
     st.stop()
 
-if "messages" not in st.session_state:
-    # Each entry: {"role": "user"|"assistant", "content": str, plus for assistant
-    # turns optionally "tool_calls", "sources", "scope", "error"}.
+# ---------------------------------------------------------------- chat history state
+#
+# st.session_state["messages"] mirrors the current conversation for rendering; every
+# message is also written to SQLite (chat_store.py) so it survives a page reload or
+# an app restart. The current conversation's id is kept in the URL (?c=...) so a
+# reload (a brand-new Streamlit session) knows which conversation to reopen.
+# Each message: {"role": "user"|"assistant", "content": str, plus for assistant
+# turns optionally "tool_calls", "sources", "scope", "error"}.
+
+def start_new_conversation():
+    st.session_state["conversation_id"] = None  # created lazily on the first message
     st.session_state["messages"] = []
+    st.query_params.clear()
+
+
+def open_conversation(conversation_id):
+    st.session_state["conversation_id"] = conversation_id
+    st.session_state["messages"] = load_messages(conversation_id)
+    st.query_params["c"] = conversation_id
+
+
+def delete_current_conversation():
+    if st.session_state["conversation_id"]:
+        delete_conversation(st.session_state["conversation_id"])
+    start_new_conversation()
+
+
+def append_message(msg):
+    if st.session_state["conversation_id"] is None:
+        title = " ".join(msg["content"].split())
+        title = title[:60] + ("…" if len(title) > 60 else "")
+        conversation_id = create_conversation(title)
+        st.session_state["conversation_id"] = conversation_id
+        st.query_params["c"] = conversation_id
+    st.session_state["messages"].append(msg)
+    add_message(st.session_state["conversation_id"], msg)
+
+
+init_db()
+if "conversation_id" not in st.session_state:
+    requested = st.query_params.get("c")
+    if requested and get_conversation(requested):
+        open_conversation(requested)
+    else:
+        start_new_conversation()
 
 
 # ---------------------------------------------------------------- rendering helpers
@@ -169,9 +219,17 @@ with st.sidebar:
             ),
         )
 
-        if st.button("🗑️ Cuộc trò chuyện mới"):
-            st.session_state["messages"] = []
-            st.rerun()
+        st.button("➕ Cuộc trò chuyện mới", on_click=start_new_conversation, width="stretch")
+
+        st.markdown("**Lịch sử trò chuyện**")
+        # Filled at the end of the chat page, so a conversation created by the
+        # message just sent already shows up in the list on this same run.
+        conversation_list = st.container()
+
+        if st.session_state["conversation_id"]:
+            with st.popover("🗑️ Xoá cuộc trò chuyện này", width="stretch"):
+                st.write("Xoá vĩnh viễn cuộc trò chuyện đang mở? Không hoàn tác được.")
+                st.button("Xác nhận xoá", type="primary", on_click=delete_current_conversation)
 
     st.divider()
     st.caption("Hybrid search (bge-m3 dense + sparse) · rerank (bge-reranker-v2-m3) · LangGraph agent (Gemini)")
@@ -189,8 +247,7 @@ if page == PAGE_CHAT:
         with st.chat_message("assistant"):
             st.markdown(
                 "Xin chào! Mình trả lời câu hỏi dựa trên các tài liệu trong kho. "
-                "Chọn phạm vi tìm kiếm ở thanh bên nếu muốn hỏi riêng một tài liệu, "
-                "và cứ hỏi nối tiếp như nói chuyện bình thường."
+                "Chọn phạm vi tìm kiếm ở thanh bên nếu muốn hỏi riêng một tài liệu"
             )
 
     for msg in st.session_state["messages"]:
@@ -206,7 +263,7 @@ if page == PAGE_CHAT:
 
     if prompt:
         history = build_history(st.session_state["messages"])
-        st.session_state["messages"].append({"role": "user", "content": prompt})
+        append_message({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
@@ -252,7 +309,7 @@ if page == PAGE_CHAT:
                 status.update(label="Có lỗi xảy ra", state="error", expanded=False)
                 error_text = f"Có lỗi xảy ra: {e}"
                 st.error(error_text)
-                st.session_state["messages"].append({"role": "assistant", "content": error_text, "error": True})
+                append_message({"role": "assistant", "content": error_text, "error": True})
             else:
                 status.update(label=f"Hoàn tất sau {step_num} lượt tìm kiếm", state="complete", expanded=False)
                 final_answer = final_answer or streamed_text or "_(Không có câu trả lời.)_"
@@ -268,7 +325,22 @@ if page == PAGE_CHAT:
                     "scope": book_title,
                 }
                 render_assistant_extras(assistant_msg)
-                st.session_state["messages"].append(assistant_msg)
+                append_message(assistant_msg)
+
+    with conversation_list:
+        conversations = list_conversations(limit=30)
+        if not conversations:
+            st.caption("Chưa có cuộc trò chuyện nào.")
+        for conv in conversations:
+            is_current = conv["id"] == st.session_state["conversation_id"]
+            st.button(
+                conv["title"],
+                key=f"conv_{conv['id']}",
+                on_click=open_conversation,
+                args=(conv["id"],),
+                type="primary" if is_current else "tertiary",
+                width="stretch",
+            )
 
 
 # ---------------------------------------------------------------- upload page
