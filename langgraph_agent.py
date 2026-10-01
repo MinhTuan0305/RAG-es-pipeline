@@ -29,15 +29,29 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from rag_pipeline import (
+    EMBED_MODEL_NAME,
     GEMINI_MODEL,
+    RERANKER_MODEL_NAME,
     build_context,
+    embed_query,
+    knn_search,
     load_embed_model,
     load_es_client,
     load_reranker,
-    search,
+    reciprocal_rank_fusion,
+    rerank,
+    sparse_search,
 )
+from tracing import flush, make_callback_handler, traced_step
 
 load_dotenv()
+
+# Retrieval settings for one search_documents call (same defaults as rag_pipeline.search).
+DENSE_K = 20
+SPARSE_K = 20
+FUSED_TOP_N = 20
+FINAL_TOP_N = 5
+TRACE_NAME = "document-qa"
 
 
 def extract_text(content) -> str:
@@ -83,6 +97,7 @@ class RunContext:
 
     book_id: str | None = None      # None = search the whole library
     book_title: str | None = None   # shown to the LLM so it knows the scope
+    conversation_id: str | None = None  # groups this question's trace with its conversation
     # search_documents must return a plain string (the ToolMessage the LLM reads), so
     # the raw hits -- needed for source citations -- are collected here instead.
     sources: list = field(default_factory=list)
@@ -93,6 +108,20 @@ class RunContext:
     # The LLM can request several searches in one turn and ToolNode runs them in
     # parallel; the lock keeps the dedup check-and-record step atomic between them.
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+
+def _location(src) -> str:
+    location = f"Chapter {src['chapter_title']}"
+    if src.get("section_title"):
+        location += f" > {src['section_title']}"
+    return location
+
+
+def _hit_row(rank, hit, **scores):
+    """One readable line of a ranked result list in the trace (no passage text)."""
+    src = hit["_source"]
+    return {"rank": rank, "chunk_id": src["chunk_id"], "document": src["book_title"],
+            "location": _location(src), **scores}
 
 
 class DocumentQAAgent:
@@ -121,26 +150,85 @@ class DocumentQAAgent:
             # `config` is injected by LangGraph and hidden from the LLM -- the model
             # only ever sees and fills in `query`.
             ctx: RunContext = config["configurable"]["run_context"]
+            scope = ctx.book_title or "all documents"
 
-            # The search itself runs outside the lock, so parallel searches overlap.
-            results = search(es, embed_model, reranker, query, final_top_n=5, book_id=ctx.book_id)
+            # Same pipeline as rag_pipeline.search(), run step by step so each step is
+            # its own span in the trace (with timing and a readable result table).
+            # Searches run outside ctx.lock, so parallel searches still overlap.
+            dense_vec, sparse_weights = traced_step(
+                "1. embed_query (bge-m3)", {"query": query},
+                lambda: embed_query(embed_model, query),
+                lambda r: {
+                    "dense_dims": len(r[0]),
+                    "top_sparse_tokens": {
+                        tok: round(w, 3) for tok, w in sorted(r[1].items(), key=lambda kv: -kv[1])[:10]
+                    },
+                },
+            )
+            dense_hits = traced_step(
+                "2a. dense_knn_search",
+                {"k": DENSE_K, "num_candidates": DENSE_K * 5, "scope": scope},
+                lambda: knn_search(es, dense_vec, k=DENSE_K, num_candidates=DENSE_K * 5, book_id=ctx.book_id),
+                lambda hits: [_hit_row(i, h, knn_score=round(h["_score"], 4)) for i, h in enumerate(hits, 1)],
+            )
+            sparse_hits = traced_step(
+                "2b. sparse_search (rank_feature)", {"size": SPARSE_K, "scope": scope},
+                lambda: sparse_search(es, sparse_weights, size=SPARSE_K, book_id=ctx.book_id),
+                lambda hits: [_hit_row(i, h, sparse_score=round(h["_score"], 4)) for i, h in enumerate(hits, 1)],
+            )
+            dense_rank = {h["_id"]: i for i, h in enumerate(dense_hits, 1)}
+            sparse_rank = {h["_id"]: i for i, h in enumerate(sparse_hits, 1)}
+            fused = traced_step(
+                "3. rrf_fusion",
+                {"rrf_k": 60, "dense_hits": len(dense_hits), "sparse_hits": len(sparse_hits), "keep_top": FUSED_TOP_N},
+                lambda: reciprocal_rank_fusion([dense_hits, sparse_hits])[:FUSED_TOP_N],
+                lambda entries: [
+                    _hit_row(
+                        i, e["hit"], rrf_score=round(e["rrf_score"], 5),
+                        dense_rank=dense_rank.get(e["hit"]["_id"]), sparse_rank=sparse_rank.get(e["hit"]["_id"]),
+                    )
+                    for i, e in enumerate(entries, 1)
+                ],
+            )
+            ranked = traced_step(
+                "4. rerank (bge-reranker-v2-m3)",
+                {"query": query, "candidates": len(fused), "keep_top": FINAL_TOP_N},
+                lambda: rerank(reranker, query, fused, top_n=FINAL_TOP_N),
+                lambda entries: [
+                    _hit_row(i, e["hit"], rerank_score=round(float(e["rerank_score"]), 4), rrf_score=round(e["rrf_score"], 5))
+                    for i, e in enumerate(entries, 1)
+                ],
+            )
 
-            with ctx.lock:
-                new_results = [
-                    c for c in results
-                    if c["hit"]["_source"]["chunk_id"] not in ctx.seen_chunk_ids
-                ]
-                for c in new_results:
-                    ctx.seen_chunk_ids.add(c["hit"]["_source"]["chunk_id"])
-                ctx.calls.append({"query": query, "num_hits": len(new_results)})
-                ctx.sources.extend(new_results)
+            def dedup():
+                with ctx.lock:
+                    new = [c for c in ranked if c["hit"]["_source"]["chunk_id"] not in ctx.seen_chunk_ids]
+                    for c in new:
+                        ctx.seen_chunk_ids.add(c["hit"]["_source"]["chunk_id"])
+                    ctx.calls.append({"query": query, "num_hits": len(new)})
+                    ctx.sources.extend(new)
+                return new
+
+            new_results = traced_step(
+                "5. dedup_against_previous_searches",
+                {"reranked": [c["hit"]["_source"]["chunk_id"] for c in ranked]},
+                dedup,
+                lambda new: {
+                    "kept": [c["hit"]["_source"]["chunk_id"] for c in new],
+                    "dropped_already_seen": [
+                        c["hit"]["_source"]["chunk_id"] for c in ranked if c not in new
+                    ],
+                },
+            )
 
             if not new_results:
                 return "(Không có đoạn mới nào -- các đoạn khớp với truy vấn này đã được tìm thấy ở lần tìm kiếm trước.)"
             return build_context(new_results)
 
+        self.model_name = model
         llm = ChatGoogleGenerativeAI(model=model, temperature=0.2, google_api_key=api_key)
-        llm_with_tools = llm.bind_tools([search_documents])
+        # run_name: shows up as e.g. "gemini-2.5-flash" in the trace instead of the class name.
+        llm_with_tools = llm.bind_tools([search_documents]).with_config(run_name=model)
 
         def call_agent(state: MessagesState):
             response = llm_with_tools.invoke(state["messages"])
@@ -155,9 +243,35 @@ class DocumentQAAgent:
 
         self.graph = graph_builder.compile()
 
-    @staticmethod
-    def _run_config(ctx: RunContext):
-        return {"configurable": {"run_context": ctx}}
+    def _run_config(self, ctx: RunContext, history, handler):
+        config = {"configurable": {"run_context": ctx}, "run_name": TRACE_NAME}
+        if handler is None:
+            return config
+
+        # Keys prefixed "langfuse_" become trace attributes (name, session, tags);
+        # the rest is trace metadata. Langfuse coerces metadata values to strings and
+        # caps them at 200 chars, so only short, scalar facts go here -- the detailed
+        # per-step data lives in each step span's input/output instead.
+        metadata = {
+            "langfuse_trace_name": TRACE_NAME,
+            "langfuse_tags": [
+                f"scope:{ctx.book_id or 'all'}",
+                "follow-up" if history else "first-question",
+            ],
+            "scope_document": (ctx.book_title or "all documents")[:200],
+            "history_messages": len(history or []),
+            "llm_model": self.model_name,
+            "embed_model": EMBED_MODEL_NAME,
+            "reranker_model": RERANKER_MODEL_NAME,
+            "retrieval_params": (
+                f"dense_k={DENSE_K} sparse_k={SPARSE_K} fused_top_n={FUSED_TOP_N} final_top_n={FINAL_TOP_N}"
+            ),
+        }
+        if ctx.conversation_id:
+            metadata["langfuse_session_id"] = ctx.conversation_id
+        config["callbacks"] = [handler]
+        config["metadata"] = metadata
+        return config
 
     def _initial_state(self, query_text: str, book_title=None, history=None):
         messages = [SystemMessage(content=SYSTEM_PROMPT)]
@@ -183,7 +297,7 @@ class DocumentQAAgent:
         ctx = RunContext(book_id=book_id, book_title=book_title)
         result = self.graph.invoke(
             self._initial_state(query_text, ctx.book_title, history),
-            config=self._run_config(ctx),
+            config=self._run_config(ctx, history, make_callback_handler()),
         )
         final_answer = extract_text(result["messages"][-1].content)
         return final_answer, ctx.sources, ctx.calls
@@ -208,7 +322,9 @@ class DocumentQAAgent:
         """
         initial_state = self._initial_state(query_text, ctx.book_title, history)
         for mode, payload in self.graph.stream(
-            initial_state, config=self._run_config(ctx), stream_mode=["updates", "messages"],
+            initial_state,
+            config=self._run_config(ctx, history, make_callback_handler()),
+            stream_mode=["updates", "messages"],
         ):
             if mode == "messages":
                 chunk, metadata = payload
@@ -246,3 +362,7 @@ if __name__ == "__main__":
         for c in sources:
             src = c["hit"]["_source"]
             print(f"  - {src['chunk_id']} (Chapter {src['chapter_title']}, rerank_score={c['rerank_score']:.4f})")
+
+    # Langfuse sends traces in the background in batches -- send what's left before
+    # this short-lived script exits (the long-running Streamlit app doesn't need this).
+    flush()

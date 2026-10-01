@@ -273,6 +273,8 @@ if page == PAGE_CHAT:
         run = RunContext(
             book_id=selected_doc["book_id"] if selected_doc else None,
             book_title=selected_doc["book_title"] if selected_doc else None,
+            # Already set: append_message() above creates the conversation if needed.
+            conversation_id=st.session_state["conversation_id"],
         )
 
         with st.chat_message("assistant"):
