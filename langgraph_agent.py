@@ -20,7 +20,6 @@ import os
 import threading
 from dataclasses import dataclass, field
 
-from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
@@ -28,6 +27,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
+from config import settings
 from rag_pipeline import (
     EMBED_MODEL_NAME,
     GEMINI_MODEL,
@@ -44,14 +44,12 @@ from rag_pipeline import (
 )
 from tracing import flush, make_callback_handler, traced_step
 
-load_dotenv()
-
-# Retrieval settings for one search_documents call (same defaults as rag_pipeline.search).
-DENSE_K = 20
-SPARSE_K = 20
-FUSED_TOP_N = 20
-FINAL_TOP_N = 5
-TRACE_NAME = "document-qa"
+# Retrieval settings for one search_documents call (from .env, see config.py).
+DENSE_K = settings.dense_k
+SPARSE_K = settings.sparse_k
+FUSED_TOP_N = settings.fused_top_n
+FINAL_TOP_N = settings.final_top_n
+TRACE_NAME = settings.trace_name
 
 
 def extract_text(content) -> str:
@@ -180,7 +178,7 @@ class DocumentQAAgent:
             sparse_rank = {h["_id"]: i for i, h in enumerate(sparse_hits, 1)}
             fused = traced_step(
                 "3. rrf_fusion",
-                {"rrf_k": 60, "dense_hits": len(dense_hits), "sparse_hits": len(sparse_hits), "keep_top": FUSED_TOP_N},
+                {"rrf_k": settings.rrf_k, "dense_hits": len(dense_hits), "sparse_hits": len(sparse_hits), "keep_top": FUSED_TOP_N},
                 lambda: reciprocal_rank_fusion([dense_hits, sparse_hits])[:FUSED_TOP_N],
                 lambda entries: [
                     _hit_row(
@@ -226,7 +224,7 @@ class DocumentQAAgent:
             return build_context(new_results)
 
         self.model_name = model
-        llm = ChatGoogleGenerativeAI(model=model, temperature=0.2, google_api_key=api_key)
+        llm = ChatGoogleGenerativeAI(model=model, temperature=settings.llm_temperature, google_api_key=api_key)
         # run_name: shows up as e.g. "gemini-2.5-flash" in the trace instead of the class name.
         llm_with_tools = llm.bind_tools([search_documents]).with_config(run_name=model)
 

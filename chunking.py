@@ -1,35 +1,14 @@
-"""
-Generic paragraph -> token-budgeted, overlapping chunk logic.
-
-Operates on any "book" dict shaped like:
-    {
-        "book_id": str, "book_title": str, "author": str,
-        "front_matter": [{"type": "paragraph"|"verse", "text": str}, ...],
-        "chapters": [
-            {
-                "chapter_number": int, "chapter_title": str,
-                "sections": [
-                    {"section_index": int, "paragraphs": [{"paragraph_index": int, "type": str, "text": str}, ...]},
-                    ...
-                ],
-            },
-            ...
-        ],
-    }
-
-This shape is source-agnostic -- the same chunker is used whether the book dict came
-from the hand-written Gutenberg-text extraction (ingestion_pipeline.ipynb) or from the
-`unstructured`-based document upload feature (document_ingest.py).
-"""
-
 import re
 
 from transformers import AutoTokenizer
 
-TOKENIZER_NAME = "BAAI/bge-m3"
-TARGET_CHUNK_TOKENS = 450   # soft target: stop accumulating paragraphs once exceeded
-MAX_CHUNK_TOKENS = 600      # hard cap: only a single oversized paragraph is force-split above this
-OVERLAP_RATIO = 0.15        # ~15% of TARGET_CHUNK_TOKENS carried forward into the next chunk
+from config import settings
+
+# Token counts must use the embedding model's own tokenizer, so it follows EMBED_MODEL.
+TOKENIZER_NAME = settings.embed_model
+TARGET_CHUNK_TOKENS = settings.chunk_target_tokens  # soft target: stop accumulating paragraphs once exceeded
+MAX_CHUNK_TOKENS = settings.chunk_max_tokens        # hard cap: only a single oversized paragraph is force-split above this
+OVERLAP_RATIO = settings.chunk_overlap_ratio        # share of TARGET_CHUNK_TOKENS carried forward into the next chunk
 
 SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+(?=[A-Z0-9"‘’“”])')
 

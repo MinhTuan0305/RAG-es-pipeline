@@ -11,9 +11,9 @@ import sqlite3
 import uuid
 from contextlib import closing
 from datetime import datetime, timezone
-from pathlib import Path
+from config import settings
 
-DB_PATH = Path(__file__).parent / "chat_history.db"
+DB_PATH = settings.chat_db_path
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
@@ -48,6 +48,7 @@ def _connect():
 
 
 def init_db():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)  # CHAT_DB_PATH may point into a new folder
     with closing(_connect()) as conn, conn:
         conn.executescript(_SCHEMA)
 

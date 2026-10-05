@@ -14,6 +14,7 @@ from chat_store import (
     load_messages,
 )
 from chunking import build_chunk_records, get_tokenizer
+from config import settings
 from document_ingest import SUPPORTED_EXTENSIONS, ingest_document, tree_to_book
 from langgraph_agent import DocumentQAAgent, RunContext, extract_text
 from rag_pipeline import (
@@ -26,7 +27,7 @@ from rag_pipeline import (
     load_reranker,
 )
 
-MAX_HISTORY_MESSAGES = 6
+MAX_HISTORY_MESSAGES = settings.max_history_messages
 
 PAGE_CHAT = "Trò chuyện"
 PAGE_UPLOAD = "Thêm tài liệu"
@@ -39,17 +40,17 @@ def get_es_client():
     return load_es_client()
 
 
-@st.cache_resource(show_spinner="Đang load model embedding (bge-m3)...")
+@st.cache_resource(show_spinner=f"Đang load model embedding ({settings.embed_model})...")
 def get_embed_model():
     return load_embed_model()
 
 
-@st.cache_resource(show_spinner="Đang load model reranker (bge-reranker-v2-m3)...")
+@st.cache_resource(show_spinner=f"Đang load model reranker ({settings.reranker_model})...")
 def get_reranker():
     return load_reranker()
 
 
-@st.cache_resource(show_spinner="Đang khởi tạo agent (LangGraph + Gemini)...")
+@st.cache_resource(show_spinner=f"Đang khởi tạo agent (LangGraph + {settings.llm_model})...")
 def get_agent():
     return DocumentQAAgent(get_es_client(), get_embed_model(), get_reranker())
 
@@ -232,7 +233,10 @@ with st.sidebar:
                 st.button("Xác nhận xoá", type="primary", on_click=delete_current_conversation)
 
     st.divider()
-    st.caption("Hybrid search (bge-m3 dense + sparse) · rerank (bge-reranker-v2-m3) · LangGraph agent (Gemini)")
+    st.caption(
+        f"Hybrid search ({settings.embed_model.split('/')[-1]} dense + sparse) · "
+        f"rerank ({settings.reranker_model.split('/')[-1]}) · LangGraph agent ({settings.llm_model})"
+    )
 
 
 # ---------------------------------------------------------------- chat page

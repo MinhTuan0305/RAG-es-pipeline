@@ -11,6 +11,8 @@ import os
 
 from langchain_core.runnables import RunnableLambda
 
+import config  # noqa: F401 -- loads .env, so LANGFUSE_* keys are visible even if imported first
+
 logger = logging.getLogger(__name__)
 
 _warned = False
