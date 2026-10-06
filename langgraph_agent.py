@@ -32,23 +32,15 @@ from rag_pipeline import (
     EMBED_MODEL_NAME,
     GEMINI_MODEL,
     RERANKER_MODEL_NAME,
+    RetrievalParams,
     build_context,
-    embed_query,
-    knn_search,
     load_embed_model,
     load_es_client,
     load_reranker,
-    reciprocal_rank_fusion,
-    rerank,
-    sparse_search,
+    retrieve,
 )
 from tracing import flush, make_callback_handler, traced_step
 
-# Retrieval settings for one search_documents call (from .env, see config.py).
-DENSE_K = settings.dense_k
-SPARSE_K = settings.sparse_k
-FUSED_TOP_N = settings.fused_top_n
-FINAL_TOP_N = settings.final_top_n
 TRACE_NAME = settings.trace_name
 
 
@@ -109,20 +101,6 @@ class RunContext:
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
-def _location(src) -> str:
-    location = f"Chapter {src['chapter_title']}"
-    if src.get("section_title"):
-        location += f" > {src['section_title']}"
-    return location
-
-
-def _hit_row(rank, hit, **scores):
-    """One readable line of a ranked result list in the trace (no passage text)."""
-    src = hit["_source"]
-    return {"rank": rank, "chunk_id": src["chunk_id"], "document": src["book_title"],
-            "location": _location(src), **scores}
-
-
 class DocumentQAAgent:
     """Bundles the compiled LangGraph graph with the resources search_documents needs.
 
@@ -131,13 +109,15 @@ class DocumentQAAgent:
     gets its own RunContext.
     """
 
-    def __init__(self, es, embed_model, reranker, google_api_key=None, model=GEMINI_MODEL):
+    def __init__(self, es, embed_model, reranker, google_api_key=None, model=GEMINI_MODEL, retrieval_params=None):
         api_key = google_api_key or os.environ.get("GOOGLE_API_KEY")
         if not api_key:
             raise RuntimeError(
                 "Chưa có GOOGLE_API_KEY trong biến môi trường/.env. "
                 "Lấy API key tại https://aistudio.google.com/apikey"
             )
+        params = retrieval_params or RetrievalParams()
+        self.retrieval_params = params
 
         @tool
         def search_documents(query: str, config: RunnableConfig) -> str:
@@ -149,55 +129,14 @@ class DocumentQAAgent:
             # `config` is injected by LangGraph and hidden from the LLM -- the model
             # only ever sees and fills in `query`.
             ctx: RunContext = config["configurable"]["run_context"]
-            scope = ctx.book_title or "all documents"
 
-            # Same pipeline as rag_pipeline.search(), run step by step so each step is
-            # its own span in the trace (with timing and a readable result table).
-            # Searches run outside ctx.lock, so parallel searches still overlap.
-            dense_vec, sparse_weights = traced_step(
-                "1. embed_query (bge-m3)", {"query": query},
-                lambda: embed_query(embed_model, query),
-                lambda r: {
-                    "dense_dims": len(r[0]),
-                    "top_sparse_tokens": {
-                        tok: round(w, 3) for tok, w in sorted(r[1].items(), key=lambda kv: -kv[1])[:10]
-                    },
-                },
-            )
-            dense_hits = traced_step(
-                "2a. dense_knn_search",
-                {"k": DENSE_K, "num_candidates": DENSE_K * 5, "scope": scope},
-                lambda: knn_search(es, dense_vec, k=DENSE_K, num_candidates=DENSE_K * 5, book_id=ctx.book_id),
-                lambda hits: [_hit_row(i, h, knn_score=round(h["_score"], 4)) for i, h in enumerate(hits, 1)],
-            )
-            sparse_hits = traced_step(
-                "2b. sparse_search (rank_feature)", {"size": SPARSE_K, "scope": scope},
-                lambda: sparse_search(es, sparse_weights, size=SPARSE_K, book_id=ctx.book_id),
-                lambda hits: [_hit_row(i, h, sparse_score=round(h["_score"], 4)) for i, h in enumerate(hits, 1)],
-            )
-            dense_rank = {h["_id"]: i for i, h in enumerate(dense_hits, 1)}
-            sparse_rank = {h["_id"]: i for i, h in enumerate(sparse_hits, 1)}
-            fused = traced_step(
-                "3. rrf_fusion",
-                {"rrf_k": settings.rrf_k, "dense_hits": len(dense_hits), "sparse_hits": len(sparse_hits), "keep_top": FUSED_TOP_N},
-                lambda: reciprocal_rank_fusion([dense_hits, sparse_hits])[:FUSED_TOP_N],
-                lambda entries: [
-                    _hit_row(
-                        i, e["hit"], rrf_score=round(e["rrf_score"], 5),
-                        dense_rank=dense_rank.get(e["hit"]["_id"]), sparse_rank=sparse_rank.get(e["hit"]["_id"]),
-                    )
-                    for i, e in enumerate(entries, 1)
-                ],
-            )
-            ranked = traced_step(
-                "4. rerank (bge-reranker-v2-m3)",
-                {"query": query, "candidates": len(fused), "keep_top": FINAL_TOP_N},
-                lambda: rerank(reranker, query, fused, top_n=FINAL_TOP_N),
-                lambda entries: [
-                    _hit_row(i, e["hit"], rerank_score=round(float(e["rerank_score"]), 4), rrf_score=round(e["rrf_score"], 5))
-                    for i, e in enumerate(entries, 1)
-                ],
-            )
+            # traced_step turns every pipeline step into its own trace span (timing +
+            # readable result table). Searches run outside ctx.lock, so parallel
+            # searches still overlap; only the dedup below is serialized.
+            ranked = retrieve(
+                es, embed_model, reranker, query,
+                book_id=ctx.book_id, params=params, run_step=traced_step, scope_label=ctx.book_title,
+            ).ranked
 
             def dedup():
                 with ctx.lock:
@@ -262,9 +201,7 @@ class DocumentQAAgent:
             "llm_model": self.model_name,
             "embed_model": EMBED_MODEL_NAME,
             "reranker_model": RERANKER_MODEL_NAME,
-            "retrieval_params": (
-                f"dense_k={DENSE_K} sparse_k={SPARSE_K} fused_top_n={FUSED_TOP_N} final_top_n={FINAL_TOP_N}"
-            ),
+            "retrieval_params": self.retrieval_params.describe(),
         }
         if ctx.conversation_id:
             metadata["langfuse_session_id"] = ctx.conversation_id

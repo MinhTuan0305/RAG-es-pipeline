@@ -1,10 +1,8 @@
-import os
+from dataclasses import dataclass
 
 import torch
 from elasticsearch import Elasticsearch
 from FlagEmbedding import BGEM3FlagModel, FlagReranker
-from google import genai
-from google.genai import types
 
 from config import settings
 from es_index import ES_HOST, INDEX_MAPPING, INDEX_NAME, ensure_index_exists, versioned_index  # noqa: F401 (re-exported)
@@ -15,11 +13,8 @@ GEMINI_MODEL = settings.llm_model
 
 SOURCE_EXCLUDES = {"excludes": ["embedding", "sparse_embedding"]}
 
-SYSTEM_PROMPT = """Bạn là trợ lý trả lời câu hỏi dựa trên kho tài liệu đã được index trong hệ thống -- kho này có thể chứa nhiều tài liệu khác nhau (sách, báo cáo, tài liệu,...), không chỉ riêng một cuốn.
-Chỉ được trả lời dựa trên các đoạn trích (context) được cung cấp bên dưới -- KHÔNG dùng kiến thức bên ngoài, KHÔNG suy đoán hay bịa thêm chi tiết không có trong context.
-Mỗi đoạn trích đều ghi rõ tên tài liệu nguồn -- nếu context có đoạn từ nhiều tài liệu khác nhau, hãy phân biệt rõ thông tin nào đến từ tài liệu nào, không gộp lẫn.
-Nếu context không đủ thông tin để trả lời, hãy nói rõ là không tìm thấy thông tin liên quan trong các đoạn được cung cấp, đừng cố trả lời.
-Khi trả lời, trích dẫn tên tài liệu và chương/mục liên quan (ví dụ: "(The Great Gatsby, Chapter III)") cho các chi tiết quan trọng."""
+# kNN looks at k * this many candidates per shard before picking the top k.
+KNN_CANDIDATES_FACTOR = 5
 
 
 def get_device():
@@ -40,16 +35,6 @@ def load_embed_model():
 def load_reranker():
     device = get_device()
     return FlagReranker(RERANKER_MODEL_NAME, use_fp16=(device == "cuda"), device=device)
-
-
-def load_gemini_client():
-    api_key = os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "Chưa có GOOGLE_API_KEY trong biến môi trường. "
-            "Lấy API key tại https://aistudio.google.com/apikey rồi set biến môi trường trước khi chạy app."
-        )
-    return genai.Client(api_key=api_key)
 
 
 def embed_query(embed_model, query_text):
@@ -95,7 +80,8 @@ def list_documents(es):
     return sorted(docs, key=lambda d: d["book_title"].lower())
 
 
-def knn_search(es, query_vector, k=20, num_candidates=100, book_id=None):
+def knn_search(es, query_vector, k=settings.dense_k, num_candidates=None, book_id=None):
+    num_candidates = num_candidates or k * KNN_CANDIDATES_FACTOR
     knn = {"field": "embedding", "query_vector": query_vector, "k": k, "num_candidates": num_candidates}
     if book_id:
         # Filter inside the knn clause (pre-filtering) so we still get k hits from
@@ -136,19 +122,6 @@ def reciprocal_rank_fusion(result_lists, k=settings.rrf_k):
     return sorted(fused.values(), key=lambda e: -e["rrf_score"])
 
 
-def hybrid_retrieve(
-    es, embed_model, query_text,
-    dense_k=settings.dense_k, sparse_k=settings.sparse_k, fused_top_n=settings.fused_top_n, book_id=None,
-):
-    dense_vec, sparse_weights = embed_query(embed_model, query_text)
-
-    dense_hits = knn_search(es, dense_vec, k=dense_k, num_candidates=dense_k * 5, book_id=book_id)
-    sparse_hits = sparse_search(es, sparse_weights, size=sparse_k, book_id=book_id)
-
-    fused = reciprocal_rank_fusion([dense_hits, sparse_hits])
-    return fused[:fused_top_n]
-
-
 def rerank(reranker, query_text, candidates, top_n=settings.final_top_n):
     if not candidates:
         return []
@@ -163,56 +136,142 @@ def rerank(reranker, query_text, candidates, top_n=settings.final_top_n):
     return sorted(candidates, key=lambda c: -c["rerank_score"])[:top_n]
 
 
+# ---------------------------------------------------------------- retrieval (single entry point)
+
+@dataclass(frozen=True)
+class RetrievalParams:
+    """Knobs for one retrieve() call. Defaults come from .env (config.py); pass a
+    different instance to compare settings, e.g. in an evaluation run."""
+
+    dense_k: int = settings.dense_k
+    sparse_k: int = settings.sparse_k
+    sparse_top_tokens: int = settings.sparse_top_tokens
+    num_candidates_factor: int = KNN_CANDIDATES_FACTOR
+    rrf_k: int = settings.rrf_k
+    fused_top_n: int = settings.fused_top_n
+    final_top_n: int = settings.final_top_n
+
+    @property
+    def num_candidates(self) -> int:
+        return self.dense_k * self.num_candidates_factor
+
+    def describe(self) -> str:
+        return (
+            f"dense_k={self.dense_k} sparse_k={self.sparse_k} fused_top_n={self.fused_top_n} "
+            f"final_top_n={self.final_top_n} rrf_k={self.rrf_k}"
+        )
+
+
+@dataclass
+class RetrievalResult:
+    """Everything one retrieve() call produced, intermediate lists included (handy for
+    evaluation: e.g. recall of dense vs sparse without querying ES again)."""
+
+    query: str
+    dense_hits: list   # raw ES hits from kNN
+    sparse_hits: list  # raw ES hits from the rank_feature query
+    fused: list        # RRF entries {"hit", "rrf_score"}, best fused_top_n
+    ranked: list       # fused entries + "rerank_score", best final_top_n -- the final result
+
+
+def plain_step(name, inputs, fn, summarize):
+    """Default `run_step` for retrieve(): just run the step. The agent passes
+    tracing.traced_step instead, which also records each step as a trace span."""
+    return fn()
+
+
+def chunk_location(src) -> str:
+    location = f"Chapter {src['chapter_title']}"
+    if src.get("section_title"):
+        location += f" > {src['section_title']}"
+    return location
+
+
+def _hit_row(rank, hit, **scores):
+    """One readable line of a ranked result list in a trace (no passage text)."""
+    src = hit["_source"]
+    return {"rank": rank, "chunk_id": src["chunk_id"], "document": src["book_title"],
+            "location": chunk_location(src), **scores}
+
+
+def _model_label(model_name: str) -> str:
+    return model_name.split("/")[-1]
+
+
+def retrieve(es, embed_model, reranker, query, *, book_id=None, params=RetrievalParams(),
+             run_step=plain_step, scope_label=None) -> RetrievalResult:
+    """The whole retrieval pipeline for one query:
+    embed (dense + sparse) -> kNN + sparse search -> RRF fusion -> rerank.
+
+    book_id: restrict to one document (None = whole library).
+    run_step(name, inputs, fn, summarize): wraps every step. Default just calls fn();
+        pass tracing.traced_step to get one trace span per step, where `inputs` and
+        `summarize(result)` are the small readable dicts shown in the trace.
+    scope_label: human-readable scope for the trace (e.g. the document title).
+    """
+    scope = scope_label or book_id or "all documents"
+
+    dense_vec, sparse_weights = run_step(
+        f"1. embed_query ({_model_label(EMBED_MODEL_NAME)})", {"query": query},
+        lambda: embed_query(embed_model, query),
+        lambda r: {
+            "dense_dims": len(r[0]),
+            "top_sparse_tokens": {
+                tok: round(w, 3) for tok, w in sorted(r[1].items(), key=lambda kv: -kv[1])[:10]
+            },
+        },
+    )
+    dense_hits = run_step(
+        "2a. dense_knn_search",
+        {"k": params.dense_k, "num_candidates": params.num_candidates, "scope": scope},
+        lambda: knn_search(es, dense_vec, k=params.dense_k, num_candidates=params.num_candidates, book_id=book_id),
+        lambda hits: [_hit_row(i, h, knn_score=round(h["_score"], 4)) for i, h in enumerate(hits, 1)],
+    )
+    sparse_hits = run_step(
+        "2b. sparse_search (rank_feature)",
+        {"size": params.sparse_k, "top_tokens": params.sparse_top_tokens, "scope": scope},
+        lambda: sparse_search(
+            es, sparse_weights, size=params.sparse_k, top_n_tokens=params.sparse_top_tokens, book_id=book_id,
+        ),
+        lambda hits: [_hit_row(i, h, sparse_score=round(h["_score"], 4)) for i, h in enumerate(hits, 1)],
+    )
+
+    dense_rank = {h["_id"]: i for i, h in enumerate(dense_hits, 1)}
+    sparse_rank = {h["_id"]: i for i, h in enumerate(sparse_hits, 1)}
+    fused = run_step(
+        "3. rrf_fusion",
+        {"rrf_k": params.rrf_k, "dense_hits": len(dense_hits), "sparse_hits": len(sparse_hits),
+         "keep_top": params.fused_top_n},
+        lambda: reciprocal_rank_fusion([dense_hits, sparse_hits], k=params.rrf_k)[:params.fused_top_n],
+        lambda entries: [
+            _hit_row(
+                i, e["hit"], rrf_score=round(e["rrf_score"], 5),
+                dense_rank=dense_rank.get(e["hit"]["_id"]), sparse_rank=sparse_rank.get(e["hit"]["_id"]),
+            )
+            for i, e in enumerate(entries, 1)
+        ],
+    )
+    ranked = run_step(
+        f"4. rerank ({_model_label(RERANKER_MODEL_NAME)})",
+        {"query": query, "candidates": len(fused), "keep_top": params.final_top_n},
+        lambda: rerank(reranker, query, fused, top_n=params.final_top_n),
+        lambda entries: [
+            _hit_row(i, e["hit"], rerank_score=round(float(e["rerank_score"]), 4), rrf_score=round(e["rrf_score"], 5))
+            for i, e in enumerate(entries, 1)
+        ],
+    )
+    return RetrievalResult(query=query, dense_hits=dense_hits, sparse_hits=sparse_hits, fused=fused, ranked=ranked)
+
+
 def build_context(results):
     blocks = []
     for i, c in enumerate(results, start=1):
         src = c["hit"]["_source"]
-        location = f"Chapter {src['chapter_title']}"
-        if src.get("section_title"):
-            location += f" > {src['section_title']}"
         kind = "Bảng" if src.get("type") == "table" else "Đoạn"
         blocks.append(
-            f"[{kind} {i} - Tài liệu: {src['book_title']} - {location}, chunk_id={src['chunk_id']}]\n{src['text']}"
+            f"[{kind} {i} - Tài liệu: {src['book_title']} - {chunk_location(src)}, chunk_id={src['chunk_id']}]\n{src['text']}"
         )
     return "\n\n".join(blocks)
-
-
-def generate_answer(gemini_client, query_text, results, model=GEMINI_MODEL):
-    context = build_context(results)
-    user_prompt = f"""Context:
-{context}
-
-Câu hỏi: {query_text}
-
-Trả lời:"""
-
-    response = gemini_client.models.generate_content(
-        model=model,
-        contents=user_prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            temperature=settings.llm_temperature,
-        ),
-    )
-    return response.text
-
-
-def search(
-    es, embed_model, reranker, query_text,
-    dense_k=settings.dense_k, sparse_k=settings.sparse_k, fused_top_n=settings.fused_top_n,
-    final_top_n=settings.final_top_n, book_id=None,
-):
-    fused = hybrid_retrieve(
-        es, embed_model, query_text,
-        dense_k=dense_k, sparse_k=sparse_k, fused_top_n=fused_top_n, book_id=book_id,
-    )
-    return rerank(reranker, query_text, fused, top_n=final_top_n)
-
-
-def ask(es, embed_model, reranker, gemini_client, query_text, final_top_n=settings.final_top_n):
-    results = search(es, embed_model, reranker, query_text, final_top_n=final_top_n)
-    answer = generate_answer(gemini_client, query_text, results)
-    return answer, results
 
 
 def embed_chunks_batch(embed_model, chunks, batch_size=settings.embed_batch_size, max_length=settings.embed_max_length):

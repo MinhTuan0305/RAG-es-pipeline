@@ -27,6 +27,7 @@ from document_ingest import (
 )
 from langgraph_agent import DocumentQAAgent, RunContext, extract_text
 from rag_pipeline import (
+    chunk_location,
     embed_chunks_batch,
     ensure_index_exists,
     index_chunks,
@@ -135,13 +136,10 @@ def to_source_records(hits):
     records = []
     for c in hits:
         src = c["hit"]["_source"]
-        location = f"Chapter {src['chapter_title']}"
-        if src.get("section_title"):
-            location += f" > {src['section_title']}"
         records.append({
             "type": src.get("type", "paragraph"),
             "book_title": src["book_title"],
-            "location": location,
+            "location": chunk_location(src),
             "chunk_id": src["chunk_id"],
             "rerank_score": c["rerank_score"],
             "text": src["text"],
