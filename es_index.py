@@ -48,6 +48,9 @@ INDEX_MAPPING = {
             "prev_chunk_id": {"type": "keyword"},
             "next_chunk_id": {"type": "keyword"},
             "text": {"type": "text", "analyzer": "english"},
+            # Original HTML of a table chunk (type="table"), kept only for display --
+            # not searchable; the chunk's Markdown `text` is what's embedded/searched.
+            "table_html": {"type": "text", "index": False},
             "embedding": {
                 "type": "dense_vector",
                 "dims": settings.embed_dims,

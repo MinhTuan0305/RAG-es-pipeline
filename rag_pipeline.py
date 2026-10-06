@@ -170,8 +170,9 @@ def build_context(results):
         location = f"Chapter {src['chapter_title']}"
         if src.get("section_title"):
             location += f" > {src['section_title']}"
+        kind = "Bảng" if src.get("type") == "table" else "Đoạn"
         blocks.append(
-            f"[Đoạn {i} - Tài liệu: {src['book_title']} - {location}, chunk_id={src['chunk_id']}]\n{src['text']}"
+            f"[{kind} {i} - Tài liệu: {src['book_title']} - {location}, chunk_id={src['chunk_id']}]\n{src['text']}"
         )
     return "\n\n".join(blocks)
 

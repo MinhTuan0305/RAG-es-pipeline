@@ -15,7 +15,16 @@ from chat_store import (
 )
 from chunking import build_chunk_records, get_tokenizer
 from config import settings
-from document_ingest import SUPPORTED_EXTENSIONS, ingest_document, tree_to_book
+from document_ingest import (
+    SUPPORTED_EXTENSIONS,
+    drop_tables,
+    get_converter,
+    ingest_document,
+    tree_html,
+    tree_stats,
+    tree_tables,
+    tree_to_book,
+)
 from langgraph_agent import DocumentQAAgent, RunContext, extract_text
 from rag_pipeline import (
     embed_chunks_batch,
@@ -48,6 +57,11 @@ def get_embed_model():
 @st.cache_resource(show_spinner=f"Đang load model reranker ({settings.reranker_model})...")
 def get_reranker():
     return load_reranker()
+
+
+@st.cache_resource(show_spinner="Đang khởi tạo Docling (lần đầu có thể mất khoảng 1 phút)...")
+def get_doc_converter():
+    return get_converter()
 
 
 @st.cache_resource(show_spinner=f"Đang khởi tạo agent (LangGraph + {settings.llm_model})...")
@@ -125,6 +139,7 @@ def to_source_records(hits):
         if src.get("section_title"):
             location += f" > {src['section_title']}"
         records.append({
+            "type": src.get("type", "paragraph"),
             "book_title": src["book_title"],
             "location": location,
             "chunk_id": src["chunk_id"],
@@ -143,10 +158,19 @@ def render_steps(tool_calls):
 def render_sources(sources):
     with st.expander(f"📚 Nguồn trích dẫn ({len(sources)} đoạn)"):
         for s in sources:
+            is_table = s.get("type") == "table"
             st.markdown(
-                f"**{s['book_title']}** — {s['location']}  \n"
+                f"{'📊 ' if is_table else ''}**{s['book_title']}** — {s['location']}  \n"
                 f"`{s['chunk_id']}` · rerank score={s['rerank_score']:.4f}"
             )
+            if is_table:
+                # The first line of a table chunk is its caption (or heading) line.
+                first_line = s["text"].split("\n", 1)[0]
+                st.caption(first_line if not first_line.startswith("|") else "Bảng")
+                with st.popover("📊 Xem bảng"):
+                    st.markdown(s["text"])
+                st.divider()
+                continue
             is_long = len(s["text"]) > 300
             st.caption(s["text"][:300] + ("..." if is_long else ""))
             if is_long:
@@ -178,22 +202,31 @@ def build_history(messages):
     return clean
 
 
-def render_tree(node, depth=0):
-    """Render a heading node and its children with visual indentation, so the real
-    parent/child relationship (e.g. an empty "1.2." containing "1.2.1."/"1.2.2." as
-    children) is obvious -- Streamlit can't nest st.expander, so indentation + icons
-    are used instead of true collapsible nesting."""
-    indent = "&nbsp;&nbsp;&nbsp;&nbsp;" * depth
-    icon = "📁" if node["children"] else "📄"
-    n_direct = len(node["paragraphs"])
-    label = node["title"] if depth > 0 else f"**{node['title']}**"
-    st.markdown(f"{indent}{icon} {label} &nbsp;·&nbsp; _{n_direct} đoạn trực tiếp_", unsafe_allow_html=True)
-    if node["paragraphs"]:
-        preview = node["paragraphs"][0][:150]
-        suffix = "..." if len(node["paragraphs"][0]) > 150 else ""
-        st.markdown(f"{indent}&nbsp;&nbsp;↳ <span style='color:gray'>{preview}{suffix}</span>", unsafe_allow_html=True)
-    for child in node["children"]:
-        render_tree(child, depth + 1)
+def table_keep_key(book_id, table_id):
+    return f"keep_table_{book_id}_{table_id}"
+
+
+def render_table_review(tables, book_id):
+    """One expander per detected table: where it sits, a tick box to leave it out, the
+    table as a reader sees it, and the exact Markdown that will be embedded."""
+    for path, table in tables:
+        name = table["caption"] or f"Bảng {table['table_id'][1:]}"
+        dims = f"{len(table['rows'])} hàng × {len(table['header'])} cột"
+        with st.expander(f"📊 {name} · {dims}"):
+            st.caption("Vị trí: " + (" › ".join(path) or "phần mở đầu"))
+            st.checkbox("Đưa bảng này vào hệ thống", value=True, key=table_keep_key(book_id, table["table_id"]))
+            view_tab, md_tab = st.tabs(["Bảng", "Nội dung sẽ embed (Markdown)"])
+            with view_tab:
+                st.markdown(table_markdown_for_display(table))
+            with md_tab:
+                st.code(table["text"], language="markdown")
+
+
+def table_markdown_for_display(table):
+    """Header + rows only -- the caption is already the expander's title."""
+    if not table["caption"]:
+        return table["text"]
+    return table["text"].split("\n", 2)[2]
 
 
 # ---------------------------------------------------------------- sidebar
@@ -362,7 +395,7 @@ if page == PAGE_CHAT:
 
 if page == PAGE_UPLOAD:
     st.subheader("Thêm tài liệu mới vào hệ thống")
-    st.caption("Hỗ trợ: PDF (cả text lẫn scan), DOCX, HTML, Markdown")
+    st.caption("Hỗ trợ: PDF (cả text lẫn scan), DOCX, HTML, Markdown · tự nhận diện bảng")
 
     uploaded_file = st.file_uploader(
         "Chọn file",
@@ -376,7 +409,8 @@ if page == PAGE_UPLOAD:
             tmp_path = tmp.name
 
         try:
-            with st.spinner("Đang phân tích cấu trúc tài liệu (unstructured)..."):
+            get_doc_converter()  # first use: slow Docling import, shown with its own spinner
+            with st.spinner("Đang phân tích cấu trúc tài liệu (Docling)..."):
                 try:
                     result = ingest_document(tmp_path, uploaded_file.name)
                 except Exception as e:
@@ -391,7 +425,7 @@ if page == PAGE_UPLOAD:
                 pass
 
         if result is not None:
-            if not result["tree"]["children"] and not result["tree"]["paragraphs"]:
+            if not result["tree"]["children"] and not result["tree"]["blocks"]:
                 st.warning("Không tìm thấy nội dung văn bản nào trong tài liệu này.")
             else:
                 st.session_state["pending_tree"] = result["tree"]
@@ -407,22 +441,25 @@ if page == PAGE_UPLOAD:
         metadata["author"] = st.text_input("Tác giả (tuỳ chọn)", value=metadata["author"])
         st.caption(f"`book_id` sẽ được gán: `{metadata['book_id']}`")
 
-        def count_all_paragraphs(node):
-            return len(node["paragraphs"]) + sum(count_all_paragraphs(c) for c in node["children"])
+        stats = tree_stats(tree)
+        tables = tree_tables(tree)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Mục / tiêu đề", stats["headings"])
+        c2.metric("Đoạn văn", stats["paragraphs"])
+        c3.metric("Bảng", stats["tables"])
 
-        def count_all_headings(node):
-            return len(node["children"]) + sum(count_all_headings(c) for c in node["children"])
+        st.markdown("**Cấu trúc phân cấp**")
+        st.caption("Bấm vào một mục để mở/đóng. Số bên cạnh là nội dung nằm trực tiếp dưới mục đó.")
+        with st.container(height=420 if stats["headings"] > 12 else "content", border=True):
+            st.html(tree_html(tree))
 
-        st.write(
-            f"Phát hiện **{count_all_headings(tree)} mục/tiêu đề** (đã lồng đúng cấp bậc), "
-            f"tổng **{count_all_paragraphs(tree)} đoạn văn**."
-        )
-        st.markdown("**Cấu trúc phân cấp phát hiện được:**")
-        with st.container(border=True):
-            if tree["paragraphs"]:
-                st.markdown(f"📄 *(Văn bản trước tiêu đề đầu tiên)* &nbsp;·&nbsp; _{len(tree['paragraphs'])} đoạn_")
-            for child in tree["children"]:
-                render_tree(child, depth=0)
+        if tables:
+            st.markdown(f"**Bảng phát hiện được ({len(tables)})**")
+            st.caption(
+                "Mỗi bảng được embed thành chunk riêng (bảng dài sẽ được chia theo hàng, giữ lại hàng tiêu đề). "
+                "Bỏ chọn những bảng không muốn đưa vào hệ thống, ví dụ bảng dùng để dàn trang."
+            )
+            render_table_review(tables, metadata["book_id"])
 
         col1, col2 = st.columns(2)
         with col1:
@@ -430,14 +467,19 @@ if page == PAGE_UPLOAD:
                 with st.status("Đang xử lý...", expanded=True) as status:
                     try:
                         st.write("Đang dựng cấu trúc chương/mục cuối cùng...")
-                        book = tree_to_book(tree, **metadata)
+                        excluded = {
+                            t["table_id"] for _, t in tables
+                            if not st.session_state.get(table_keep_key(metadata["book_id"], t["table_id"]), True)
+                        }
+                        book = tree_to_book(drop_tables(tree, excluded), **metadata)
 
                         st.write("Đang chia nhỏ văn bản (chunking)...")
                         get_tokenizer()  # trigger download/load before the progress line below
                         chunks = build_chunk_records(book)
-                        st.write(f"Đã tạo {len(chunks)} chunk.")
+                        n_table_chunks = sum(c["type"] == "table" for c in chunks)
+                        st.write(f"Đã tạo {len(chunks)} chunk ({n_table_chunks} chunk bảng).")
 
-                        st.write("Đang embedding bằng bge-m3 (dense + sparse)...")
+                        st.write(f"Đang embedding bằng {settings.embed_model} (dense + sparse)...")
                         chunks = embed_chunks_batch(get_embed_model(), chunks)
 
                         st.write("Đang tạo/kiểm tra index và index vào Elasticsearch...")
