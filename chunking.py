@@ -178,10 +178,13 @@ def build_chunk_records(book, target_tokens=TARGET_CHUNK_TOKENS, max_tokens=MAX_
                     record["table_html"] = atoms[0]["html"]
                 records.append(record)
 
-    # Global reading-order stitching, across the whole book.
+    # Global reading-order stitching, across the whole book, plus the document-level
+    # fields (source file, upload time, fingerprints) on every chunk.
+    doc_fields = book.get("doc_fields", {})
     for i, rec in enumerate(records):
         rec["global_index"] = i
         rec["prev_chunk_id"] = records[i - 1]["chunk_id"] if i > 0 else None
         rec["next_chunk_id"] = records[i + 1]["chunk_id"] if i < len(records) - 1 else None
+        rec.update(doc_fields)
 
     return records

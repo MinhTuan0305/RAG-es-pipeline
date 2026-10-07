@@ -16,9 +16,11 @@ where a block is one of
      "rows": [[str]], "text": str (Markdown, caption included), "html": str}
 """
 
+import hashlib
 import html
 import re
 import threading
+import unicodedata
 import uuid
 from pathlib import Path
 
@@ -198,8 +200,11 @@ def docling_to_tree(doc, fallback_title: str) -> dict:
     return root
 
 
-def tree_to_book(tree: dict, book_id: str, book_title: str, author: str) -> dict:
+def tree_to_book(tree: dict, book_id: str, book_title: str, author: str, **doc_fields) -> dict:
     """Flatten the nested heading tree into Book -> Chapter -> Section -> Paragraph.
+
+    doc_fields (e.g. source_file, uploaded_at, file_hash, content_hash) are copied onto
+    every chunk by chunking.build_chunk_records.
 
     Each direct child of the root becomes one Chapter. Within a chapter's subtree,
     every node that has its own directly-attached blocks (at any depth) becomes one
@@ -254,7 +259,36 @@ def tree_to_book(tree: dict, book_id: str, book_title: str, author: str) -> dict
         "author": author,
         "front_matter": [],
         "chapters": chapters,
+        "doc_fields": {k: v for k, v in doc_fields.items() if v is not None},
     }
+
+
+# ---------------------------------------------------------------- fingerprints (duplicate detection)
+
+def file_sha256(data: bytes) -> str:
+    """Fingerprint of the exact file bytes: same file = same hash, whatever its name."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def _normalize_for_hash(text: str) -> str:
+    return " ".join(unicodedata.normalize("NFC", text).lower().split())
+
+
+def tree_content_hash(tree) -> str:
+    """Fingerprint of the document's text as parsed (headings, paragraphs and tables
+    in reading order, normalized), so a re-saved or re-exported copy of the same
+    document -- different bytes, same content -- is still recognized.
+
+    Computed on the full parsed tree, before the user unticks any table, so the same
+    file always gets the same hash. The root title is left out: when the document has
+    no title of its own it's just the file name, which must not affect the hash."""
+    digest = hashlib.sha256()
+    for node in iter_nodes(tree):
+        if node is not tree:
+            digest.update(_normalize_for_hash(node["title"]).encode("utf-8") + b"\n")
+        for block in node["blocks"]:
+            digest.update(_normalize_for_hash(block["text"]).encode("utf-8") + b"\n")
+    return digest.hexdigest()
 
 
 def make_metadata(title: str) -> dict:
@@ -268,15 +302,15 @@ def make_metadata(title: str) -> dict:
 def ingest_document(file_path, filename: str) -> dict:
     """End-to-end: Docling conversion -> heading tree -> guessed metadata.
 
-    Returns {"tree": ..., "metadata": {"book_id", "book_title", "author"}}. The tree
-    (not yet a flattened book dict) is what the review UI displays, so the real
-    parent/child heading structure stays visible; call tree_to_book() only after the
-    user has reviewed the metadata/tables and confirmed.
+    Returns {"tree": ..., "metadata": {"book_id", "book_title", "author"}, "content_hash"}.
+    The tree (not yet a flattened book dict) is what the review UI displays, so the
+    real parent/child heading structure stays visible; call tree_to_book() only after
+    the user has reviewed the metadata/tables and confirmed.
     """
     result = get_converter().convert(str(file_path))
     tree = docling_to_tree(result.document, fallback_title=Path(filename).stem)
     metadata = make_metadata(tree["title"])
-    return {"tree": tree, "metadata": metadata}
+    return {"tree": tree, "metadata": metadata, "content_hash": tree_content_hash(tree)}
 
 
 # ---------------------------------------------------------------- tree helpers (review UI)
@@ -344,25 +378,24 @@ def tree_html(tree) -> str:
             if b["type"] == "table":
                 name = html.escape(b["caption"] or f"Bảng {b['table_id'][1:]}")
                 dims = f"{len(b['rows'])} hàng × {len(b['header'])} cột"
-                out.append(f"<div class='dt-table'>📊 {name} <span class='dt-meta'>{dims}</span></div>")
+                out.append(f"<div class='dt-table'>Bảng: {name} <span class='dt-meta'>{dims}</span></div>")
         return "".join(out)
 
     def render(node, level):
         title = html.escape(node["title"])
         body = table_lines(node) + "".join(render(c, level + 1) for c in node["children"])
-        icon = "📁" if node["children"] else "📄"
         if not body:
-            return f"<div class='dt-leaf'>{icon} {title} {badge(node)}</div>"
+            return f"<div class='dt-leaf'>{title} {badge(node)}</div>"
         open_attr = " open" if level == 0 else ""
         return (
-            f"<details{open_attr}><summary>{icon} {title} {badge(node)}</summary>"
+            f"<details{open_attr}><summary>{title} {badge(node)}</summary>"
             f"<div class='dt-children'>{body}</div></details>"
         )
 
     intro = ""
     if tree["blocks"]:
         intro = (
-            f"<div class='dt-leaf'>📄 <i>(Phần mở đầu, trước tiêu đề đầu tiên)</i> {badge(tree)}</div>"
+            f"<div class='dt-leaf'><i>(Phần mở đầu, trước tiêu đề đầu tiên)</i> {badge(tree)}</div>"
             + table_lines(tree)
         )
     style = """<style>

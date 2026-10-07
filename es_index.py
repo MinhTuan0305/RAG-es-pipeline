@@ -51,6 +51,13 @@ INDEX_MAPPING = {
             # Original HTML of a table chunk (type="table"), kept only for display --
             # not searchable; the chunk's Markdown `text` is what's embedded/searched.
             "table_html": {"type": "text", "index": False},
+            # Document-level fields, repeated on every chunk of an uploaded document:
+            # where it came from, and two fingerprints used to refuse duplicate uploads
+            # (file_hash = the exact file bytes, content_hash = its normalized text).
+            "source_file": {"type": "keyword"},
+            "uploaded_at": {"type": "date"},
+            "file_hash": {"type": "keyword"},
+            "content_hash": {"type": "keyword"},
             "embedding": {
                 "type": "dense_vector",
                 "dims": settings.embed_dims,

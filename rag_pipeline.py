@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 import torch
-from elasticsearch import Elasticsearch
+from elasticsearch import Elasticsearch, NotFoundError
 from FlagEmbedding import BGEM3FlagModel, FlagReranker
 
 from config import settings
@@ -57,27 +57,71 @@ def embed_query(embed_model, query_text):
     return dense_vec, sparse_weights
 
 
-def list_documents(es):
-    """All documents currently in the index: [{book_id, book_title, num_chunks}, ...]."""
-    resp = es.search(
-        index=INDEX_NAME,
-        size=0,
-        aggs={
-            "docs": {
-                "terms": {"field": "book_id", "size": 1000},
-                "aggs": {"title": {"terms": {"field": "book_title.keyword", "size": 1}}},
-            }
-        },
-    )
+def _document_summaries(es, query=None):
+    """One summary per book_id among the chunks matching `query` (all chunks if None):
+    {book_id, book_title, num_chunks, num_tables, source_file, uploaded_at}.
+    source_file/uploaded_at are None for documents indexed before those fields existed."""
+    try:
+        resp = es.search(
+            index=INDEX_NAME,
+            size=0,
+            query=query or {"match_all": {}},
+            aggs={
+                "docs": {
+                    "terms": {"field": "book_id", "size": 1000},
+                    "aggs": {
+                        "title": {"terms": {"field": "book_title.keyword", "size": 1}},
+                        "file": {"terms": {"field": "source_file", "size": 1}},
+                        "uploaded_at": {"max": {"field": "uploaded_at"}},
+                        "tables": {"filter": {"term": {"type": "table"}}},
+                    },
+                }
+            },
+        )
+    except NotFoundError:  # no index yet: nothing uploaded
+        return []
+
     docs = []
     for bucket in resp["aggregations"]["docs"]["buckets"]:
         title_buckets = bucket["title"]["buckets"]
+        file_buckets = bucket["file"]["buckets"]
+        uploaded = bucket["uploaded_at"]
         docs.append({
             "book_id": bucket["key"],
             "book_title": title_buckets[0]["key"] if title_buckets else bucket["key"],
             "num_chunks": bucket["doc_count"],
+            "num_tables": bucket["tables"]["doc_count"],
+            "source_file": file_buckets[0]["key"] if file_buckets else None,
+            "uploaded_at": uploaded.get("value_as_string") if uploaded.get("value") is not None else None,
         })
-    return sorted(docs, key=lambda d: d["book_title"].lower())
+    return docs
+
+
+def list_documents(es):
+    """All documents currently in the index, sorted by title."""
+    return sorted(_document_summaries(es), key=lambda d: d["book_title"].lower())
+
+
+def find_document_by_hash(es, file_hash=None, content_hash=None):
+    """The already-indexed document with this file or content fingerprint, as a
+    summary (see _document_summaries) plus "matched": "file" | "content"; None if no
+    document matches. A file match is reported over a content match."""
+    for field, value in (("file_hash", file_hash), ("content_hash", content_hash)):
+        if not value:
+            continue
+        docs = _document_summaries(es, query={"term": {field: value}})
+        if docs:
+            return {**docs[0], "matched": "file" if field == "file_hash" else "content"}
+    return None
+
+
+def delete_document(es, book_id) -> int:
+    """Delete every chunk of one document; returns how many were deleted. refresh=True
+    so searches and the document list stop showing it immediately."""
+    resp = es.delete_by_query(
+        index=INDEX_NAME, query={"term": {"book_id": book_id}}, refresh=True, conflicts="proceed",
+    )
+    return resp["deleted"]
 
 
 def knn_search(es, query_vector, k=settings.dense_k, num_candidates=None, book_id=None):
@@ -274,29 +318,38 @@ def build_context(results):
     return "\n\n".join(blocks)
 
 
-def embed_chunks_batch(embed_model, chunks, batch_size=settings.embed_batch_size, max_length=settings.embed_max_length):
+def embed_chunks_batch(embed_model, chunks, batch_size=settings.embed_batch_size,
+                       max_length=settings.embed_max_length, on_progress=None):
     """Embed a list of chunk dicts (each with a "text" key) in place -- adds
     "embedding" (dense) and "sparse_embedding" (lexical weights) to every chunk.
     Used when indexing a new document, as opposed to embed_query() which embeds a
-    single query string at search time."""
-    texts = [c["text"] for c in chunks]
-    output = embed_model.encode(
-        texts,
-        batch_size=batch_size,
-        max_length=max_length,
-        return_dense=True,
-        return_sparse=True,
-        return_colbert_vecs=False,
-    )
-    dense_vecs = output["dense_vecs"]
+    single query string at search time.
 
-    raw_sparse_list = embed_model.convert_id_to_token(output["lexical_weights"])
-    if isinstance(raw_sparse_list, dict):
-        raw_sparse_list = [raw_sparse_list]  # convert_id_to_token unwraps 1-item batches
+    Chunks are sent to the model batch_size at a time (one encode() call per batch),
+    so on_progress(done, total) can be called after each batch, e.g. to drive a
+    progress bar."""
+    total = len(chunks)
+    for start in range(0, total, batch_size):
+        batch = chunks[start:start + batch_size]
+        output = embed_model.encode(
+            [c["text"] for c in batch],
+            batch_size=batch_size,
+            max_length=max_length,
+            return_dense=True,
+            return_sparse=True,
+            return_colbert_vecs=False,
+        )
 
-    for chunk, dense_vec, sparse in zip(chunks, dense_vecs, raw_sparse_list):
-        chunk["embedding"] = [float(x) for x in dense_vec]
-        chunk["sparse_embedding"] = {k.replace(".", "·"): float(v) for k, v in sparse.items()}
+        raw_sparse_list = embed_model.convert_id_to_token(output["lexical_weights"])
+        if isinstance(raw_sparse_list, dict):
+            raw_sparse_list = [raw_sparse_list]  # convert_id_to_token unwraps 1-item batches
+
+        for chunk, dense_vec, sparse in zip(batch, output["dense_vecs"], raw_sparse_list):
+            chunk["embedding"] = [float(x) for x in dense_vec]
+            chunk["sparse_embedding"] = {k.replace(".", "·"): float(v) for k, v in sparse.items()}
+
+        if on_progress:
+            on_progress(min(start + batch_size, total), total)
 
     return chunks
 
