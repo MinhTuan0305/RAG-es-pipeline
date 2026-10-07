@@ -109,7 +109,7 @@ class Settings:
             chunk_target_tokens=_int("CHUNK_TARGET_TOKENS", 450),
             chunk_max_tokens=_int("CHUNK_MAX_TOKENS", 600),
             chunk_overlap_ratio=_float("CHUNK_OVERLAP_RATIO", 0.15),
-            embed_batch_size=_int("EMBED_BATCH_SIZE", 32),
+            embed_batch_size=_int("EMBED_BATCH_SIZE", 8),
             embed_max_length=_int("EMBED_MAX_LENGTH", 8192),
             max_history_messages=_int("MAX_HISTORY_MESSAGES", 6),
             chat_db_path=_path("CHAT_DB_PATH", "chat_history.db"),

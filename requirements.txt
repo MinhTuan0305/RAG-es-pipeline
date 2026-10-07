@@ -1,0 +1,31 @@
+# Install PyTorch with CUDA FIRST (see README), otherwise pip pulls the CPU-only build:
+#   pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+
+# Embedding + reranker (bge-m3, bge-reranker-v2-m3)
+FlagEmbedding==1.4.2
+transformers==5.17.0
+sentence-transformers==6.1.0
+peft==0.21.0
+
+# Search
+elasticsearch==8.19.3
+
+# LLM agent
+google-genai==2.25.0
+langchain-core==1.6.5
+langchain-google-genai==4.4.0
+langgraph==1.2.12
+
+# Tracing (optional at runtime: only active when LANGFUSE_* keys are set)
+langfuse==4.16.0
+langchain==1.4.3
+
+# Document parsing
+docling==2.133.0
+
+# App
+streamlit==1.64.0
+python-dotenv==1.2.3
+
+# Notebooks (notebook/*.ipynb)
+ipykernel==7.3.0
