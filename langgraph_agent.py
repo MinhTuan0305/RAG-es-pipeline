@@ -28,6 +28,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from config import settings
+from errors import AppError, explain_error
 from rag_pipeline import (
     EMBED_MODEL_NAME,
     GEMINI_MODEL,
@@ -112,9 +113,9 @@ class DocumentQAAgent:
     def __init__(self, es, embed_model, reranker, google_api_key=None, model=GEMINI_MODEL, retrieval_params=None):
         api_key = google_api_key or os.environ.get("GOOGLE_API_KEY")
         if not api_key:
-            raise RuntimeError(
-                "Chưa có GOOGLE_API_KEY trong biến môi trường/.env. "
-                "Lấy API key tại https://aistudio.google.com/apikey"
+            raise AppError(
+                "Chưa có GOOGLE_API_KEY.",
+                "Lấy API key tại https://aistudio.google.com/apikey rồi điền vào file .env.",
             )
         params = retrieval_params or RetrievalParams()
         self.retrieval_params = params
@@ -164,7 +165,12 @@ class DocumentQAAgent:
             return build_context(new_results)
 
         self.model_name = model
-        llm = ChatGoogleGenerativeAI(model=model, temperature=settings.llm_temperature, google_api_key=api_key)
+        # timeout: per request. max_retries: total attempts; the Gemini SDK retries
+        # 408/429/5xx and network errors with exponential backoff + jitter.
+        llm = ChatGoogleGenerativeAI(
+            model=model, temperature=settings.llm_temperature, google_api_key=api_key,
+            timeout=settings.llm_timeout, max_retries=settings.llm_max_retries,
+        )
         # run_name: shows up as e.g. "gemini-2.5-flash" in the trace instead of the class name.
         llm_with_tools = llm.bind_tools([search_documents]).with_config(run_name=model)
 
@@ -182,7 +188,13 @@ class DocumentQAAgent:
         self.graph = graph_builder.compile()
 
     def _run_config(self, ctx: RunContext, history, handler):
-        config = {"configurable": {"run_context": ctx}, "run_name": TRACE_NAME}
+        # recursion_limit caps the agent <-> tools loop, so a model that keeps searching
+        # without answering fails with a clear error instead of running indefinitely.
+        config = {
+            "configurable": {"run_context": ctx},
+            "run_name": TRACE_NAME,
+            "recursion_limit": settings.agent_recursion_limit,
+        }
         if handler is None:
             return config
 
@@ -231,10 +243,13 @@ class DocumentQAAgent:
         book_id=None searches the whole library; otherwise only that document.
         history: earlier chat turns as [{"role": "user"|"assistant", "content": str}, ...]."""
         ctx = RunContext(book_id=book_id, book_title=book_title)
-        result = self.graph.invoke(
-            self._initial_state(query_text, ctx.book_title, history),
-            config=self._run_config(ctx, history, make_callback_handler()),
-        )
+        try:
+            result = self.graph.invoke(
+                self._initial_state(query_text, ctx.book_title, history),
+                config=self._run_config(ctx, history, make_callback_handler()),
+            )
+        except Exception as e:
+            raise explain_error(e) from e
         final_answer = extract_text(result["messages"][-1].content)
         return final_answer, ctx.sources, ctx.calls
 
@@ -255,25 +270,32 @@ class DocumentQAAgent:
         the generator runs (readable live, e.g. after each "tools" update) and hold the
         complete results once it's exhausted.
         history: earlier chat turns as [{"role": "user"|"assistant", "content": str}, ...].
+
+        Any failure (Elasticsearch down, Gemini quota/timeout, out of memory, too many
+        search rounds, ...) is raised as an errors.AppError with a user-readable
+        message; the original exception is chained for the logs.
         """
         initial_state = self._initial_state(query_text, ctx.book_title, history)
-        for mode, payload in self.graph.stream(
-            initial_state,
-            config=self._run_config(ctx, history, make_callback_handler()),
-            stream_mode=["updates", "messages"],
-        ):
-            if mode == "messages":
-                chunk, metadata = payload
-                # Only incremental LLM output from the agent node -- skips ToolMessages
-                # and any non-chunk full message, which the "update" event covers.
-                if metadata.get("langgraph_node") != "agent" or not isinstance(chunk, AIMessageChunk):
-                    continue
-                text = extract_text(chunk.content)
-                if text:
-                    yield {"type": "token", "text": text}
-            else:
-                for node_name, node_output in payload.items():
-                    yield {"type": "update", "node": node_name, "messages": node_output["messages"]}
+        try:
+            for mode, payload in self.graph.stream(
+                initial_state,
+                config=self._run_config(ctx, history, make_callback_handler()),
+                stream_mode=["updates", "messages"],
+            ):
+                if mode == "messages":
+                    chunk, metadata = payload
+                    # Only incremental LLM output from the agent node -- skips ToolMessages
+                    # and any non-chunk full message, which the "update" event covers.
+                    if metadata.get("langgraph_node") != "agent" or not isinstance(chunk, AIMessageChunk):
+                        continue
+                    text = extract_text(chunk.content)
+                    if text:
+                        yield {"type": "token", "text": text}
+                else:
+                    for node_name, node_output in payload.items():
+                        yield {"type": "update", "node": node_name, "messages": node_output["messages"]}
+        except Exception as e:
+            raise explain_error(e) from e
 
 
 if __name__ == "__main__":

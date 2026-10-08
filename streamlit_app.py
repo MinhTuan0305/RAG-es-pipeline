@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import tempfile
@@ -28,6 +29,7 @@ from document_ingest import (
     tree_tables,
     tree_to_book,
 )
+from errors import AppError, explain_error
 from langgraph_agent import DocumentQAAgent, RunContext, extract_text
 from rag_pipeline import (
     chunk_location,
@@ -43,6 +45,17 @@ from rag_pipeline import (
 )
 
 MAX_HISTORY_MESSAGES = settings.max_history_messages
+
+logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+# The Gemini SDK logs each retry (429/5xx/timeouts) at INFO -- worth seeing in the terminal.
+logging.getLogger("google_genai._api_client").setLevel(logging.INFO)
+logger = logging.getLogger("streamlit_app")
+
+
+def report_error(exc, context) -> AppError:
+    """Log the full traceback to the terminal and return the user-facing explanation."""
+    logger.error("%s", context, exc_info=exc)
+    return explain_error(exc)
 
 PAGE_CHAT = "Trò chuyện"
 PAGE_UPLOAD = "Thêm tài liệu"
@@ -84,7 +97,8 @@ def get_document_list(_es):
 try:
     agent = get_agent()
 except Exception as e:
-    st.error(f"Không khởi tạo được hệ thống: {e}")
+    err = report_error(e, "Could not initialize the agent")
+    st.error(f"Không khởi tạo được hệ thống. {err.to_markdown()}")
     st.stop()
 
 # ---------------------------------------------------------------- chat history state
@@ -244,7 +258,8 @@ with st.sidebar:
         try:
             documents = get_document_list(get_es_client())
         except Exception as e:
-            st.warning(f"Không lấy được danh sách tài liệu, sẽ tìm trên toàn bộ kho: {e}")
+            err = report_error(e, "Could not list documents")
+            st.warning(f"Không lấy được danh sách tài liệu, sẽ tìm trên toàn bộ kho. {err.message}")
             documents = []
 
         selected_doc = st.selectbox(
@@ -358,7 +373,7 @@ if page == PAGE_CHAT:
             except Exception as e:
                 answer_placeholder.empty()
                 status.update(label="Có lỗi xảy ra", state="error", expanded=False)
-                error_text = f"Có lỗi xảy ra: {e}"
+                error_text = report_error(e, "Agent run failed").to_markdown()
                 st.error(error_text)
                 append_message({"role": "assistant", "content": error_text, "error": True})
             else:
@@ -467,7 +482,8 @@ def delete_document_callback(book_id, title):
     try:
         n_deleted = delete_document(get_es_client(), book_id)
     except Exception as e:
-        st.session_state["library_notice"] = ("error", f"Không xoá được **{md_escape(title)}**: {e}")
+        err = report_error(e, f"Could not delete document {book_id}")
+        st.session_state["library_notice"] = ("error", f"Không xoá được **{md_escape(title)}**. {err.to_markdown()}")
     else:
         st.session_state["library_notice"] = ("success", f"Đã xoá **{md_escape(title)}** ({n_deleted} chunk).")
     get_document_list.clear()
@@ -485,7 +501,8 @@ def parse_and_check(uploaded_file, file_hash, replace=None):
         with st.spinner("Đang phân tích cấu trúc tài liệu (Docling)..."):
             result = ingest_document(tmp_path, uploaded_file.name)
     except Exception as e:
-        st.error(f"Không phân tích được tài liệu: {e}")
+        err = report_error(e, "Document parsing failed")
+        st.error(f"Không phân tích được tài liệu. {err.to_markdown()}")
         return
     finally:
         # Docling only needs the file during parsing -- always clean it up.
@@ -507,7 +524,8 @@ def parse_and_check(uploaded_file, file_hash, replace=None):
     try:
         dup = find_document_by_hash(get_es_client(), content_hash=result["content_hash"])
     except Exception as e:
-        st.warning(f"Không kiểm tra được tài liệu trùng ({e}), vẫn tiếp tục.")
+        err = report_error(e, "Duplicate check failed")
+        st.warning(f"Không kiểm tra được tài liệu trùng ({err.message}), vẫn tiếp tục.")
         dup = None
     if dup and not (replace and dup["book_id"] == replace["book_id"]):
         st.session_state["upload_dup"] = {"existing": dup, "parsed": result, "pending_doc": pending_doc}
@@ -600,6 +618,11 @@ def embed_pending_document(tree, metadata, pending_doc, tables):
     def on_embed_progress(done, total):
         set_progress(0.10 + 0.80 * done / total, f"Đang embedding: {done}/{total} chunk")
 
+    def on_embed_retry(new_batch_size, error):
+        note = f"Thiếu bộ nhớ, đã giải phóng bộ nhớ và thử lại với {new_batch_size} chunk mỗi lượt..."
+        set_progress(progress["value"], note)
+        st.write(note)
+
     with st.status("Đang xử lý...", expanded=True) as status:
         try:
             set_progress(0.03, "Đang dựng cấu trúc chương/mục...")
@@ -628,7 +651,9 @@ def embed_pending_document(tree, metadata, pending_doc, tables):
                 f"mỗi lượt {settings.embed_batch_size} chunk..."
             )
             set_progress(0.10, f"Đang embedding: 0/{len(chunks)} chunk")
-            chunks = embed_chunks_batch(get_embed_model(), chunks, on_progress=on_embed_progress)
+            chunks = embed_chunks_batch(
+                get_embed_model(), chunks, on_progress=on_embed_progress, on_retry=on_embed_retry,
+            )
 
             set_progress(0.92, "Đang index vào Elasticsearch...")
             st.write("Đang tạo/kiểm tra index và index vào Elasticsearch...")
@@ -662,7 +687,7 @@ def embed_pending_document(tree, metadata, pending_doc, tables):
         except Exception as e:
             set_progress(progress["value"], "Dừng lại do lỗi")
             status.update(label="Có lỗi xảy ra", state="error")
-            st.error(f"Có lỗi xảy ra: {e}")
+            st.error(report_error(e, "Embedding / indexing failed").to_markdown())
             if replace:
                 st.warning(f"Tài liệu cũ **{md_escape(replace['book_title'])}** được giữ nguyên.")
 
@@ -674,7 +699,7 @@ def render_library(docs, error):
         (st.success if kind == "success" else st.error)(text)
 
     if error:
-        st.error(f"Không lấy được danh sách tài liệu: {error}")
+        st.error(f"Không lấy được danh sách tài liệu. {explain_error(error).to_markdown()}")
         return
     if not docs:
         st.info("Kho chưa có tài liệu nào. Thêm tài liệu ở tab bên cạnh.")
@@ -720,6 +745,7 @@ if page == PAGE_UPLOAD:
     try:
         library_docs, library_error = get_document_list(get_es_client()), None
     except Exception as e:
+        logger.error("Could not list documents", exc_info=e)
         library_docs, library_error = [], e
 
     tab_add, tab_library = st.tabs(["Thêm tài liệu", "Tài liệu trong kho"], key="upload_tabs")
@@ -748,7 +774,8 @@ if page == PAGE_UPLOAD:
             try:
                 dup = find_document_by_hash(get_es_client(), file_hash=file_hash)
             except Exception as e:
-                st.warning(f"Không kiểm tra được tài liệu trùng ({e}), vẫn tiếp tục xử lý.")
+                err = report_error(e, "Duplicate check failed")
+                st.warning(f"Không kiểm tra được tài liệu trùng ({err.message}), vẫn tiếp tục xử lý.")
                 dup = None
             if dup:
                 # Same bytes already indexed: stop before the (slow) Docling parse.
