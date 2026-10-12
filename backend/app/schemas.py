@@ -28,6 +28,8 @@ class SourceRecord(BaseModel):
     chunk_id: str
     rerank_score: float
     text: str
+    citation: int | None = None  # the [n] the answer cites it by (None: saved before citations)
+    cited: bool = False  # whether the final answer actually cites it
 
 
 class DocumentSummary(BaseModel):
@@ -107,14 +109,21 @@ class Token(BaseModel):
 
 
 class Sources(BaseModel):
+    """Passages found by a search round, sent right away (citations in the streaming
+    answer can be shown immediately). Each event ADDS items; numbers keep increasing."""
+
     type: Literal["sources"] = "sources"
     items: list[SourceRecord]
 
 
 class ChatDone(BaseModel):
+    """The final answer, citations cleaned up (normalized, made-up numbers removed):
+    it replaces the streamed text. `cited` = the citation numbers it uses."""
+
     type: Literal["done"] = "done"
     answer: str
     stopped: bool = False
+    cited: list[int] = []
 
 
 class ErrorEvent(ErrorBody):

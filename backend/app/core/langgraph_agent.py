@@ -71,10 +71,10 @@ Bạn có 1 công cụ: `search_documents`, dùng để tìm các đoạn trích
 - Nếu câu hỏi phức tạp hoặc cần thông tin từ nhiều khía cạnh khác nhau (ví dụ so sánh 2 nhân vật, nhiều sự kiện/tài liệu khác nhau), hãy TÁCH thành các câu hỏi con và gọi `search_documents` riêng cho từng câu hỏi con.
 - Nếu kết quả tìm kiếm đầu tiên chưa đủ để trả lời trọn vẹn, hãy gọi lại `search_documents` với một truy vấn khác (diễn đạt lại, hoặc tập trung vào khía cạnh còn thiếu) thay vì trả lời ngay với thông tin chưa đủ.
 - Chỉ trả lời dựa trên nội dung trả về từ `search_documents` -- KHÔNG bịa thêm chi tiết không có trong đó.
-- Một số kết quả là BẢNG (nhãn "[Bảng ...]", nội dung dạng Markdown): đọc đúng theo hàng/cột và trích số liệu chính xác như trong bảng, không làm tròn hay suy diễn thêm. Bảng dài có thể bị chia thành nhiều phần (ghi "phần i/n") -- nếu cần phần còn thiếu thì tìm kiếm thêm.
+- Một số kết quả là BẢNG (nhãn "(Bảng)", nội dung dạng Markdown): đọc đúng theo hàng/cột và trích số liệu chính xác như trong bảng, không làm tròn hay suy diễn thêm. Bảng dài có thể bị chia thành nhiều phần (ghi "phần i/n") -- nếu cần phần còn thiếu thì tìm kiếm thêm.
 - Mỗi đoạn trích đều ghi rõ tên tài liệu nguồn -- nếu kết quả có đoạn từ nhiều tài liệu khác nhau, hãy phân biệt rõ thông tin nào đến từ tài liệu nào, không gộp lẫn.
 - Nếu sau khi tìm kiếm vẫn không có đủ thông tin, hãy nói rõ là không tìm thấy trong kho tài liệu, đừng đoán bừa.
-- Khi trả lời, trích dẫn tên tài liệu và chương/mục liên quan (ví dụ: "(The Great Gatsby, Chapter III)") cho các chi tiết quan trọng.
+- TRÍCH DẪN NGUỒN: mỗi đoạn trích có một số trong ngoặc vuông, ví dụ "[3]". Đặt số đó ngay sau mỗi ý/câu lấy từ đoạn trích, ví dụ: "Gatsby tổ chức tiệc mỗi cuối tuần [2]." Một ý dựa trên nhiều đoạn thì viết liền: [1][4]. Chỉ dùng các số đã xuất hiện trong kết quả `search_documents` của câu hỏi này -- không tự đặt số, không trích dẫn bằng chunk_id hay tên chương. Số trích dẫn ở các câu trả lời trước trong cuộc trò chuyện không còn giá trị.
 """
 
 
@@ -144,6 +144,11 @@ class DocumentQAAgent:
                     new = [c for c in ranked if c["hit"]["_source"]["chunk_id"] not in ctx.seen_chunk_ids]
                     for c in new:
                         ctx.seen_chunk_ids.add(c["hit"]["_source"]["chunk_id"])
+                    # Citation numbers run across ALL searches of this question (1, 2,
+                    # 3, ...), so [n] in the answer always means exactly one passage.
+                    # Assigned under the lock: parallel searches never share a number.
+                    for offset, c in enumerate(new, start=1):
+                        c["citation"] = len(ctx.sources) + offset
                     ctx.calls.append({"query": query, "num_hits": len(new)})
                     ctx.sources.extend(new)
                 return new
@@ -153,7 +158,7 @@ class DocumentQAAgent:
                 {"reranked": [c["hit"]["_source"]["chunk_id"] for c in ranked]},
                 dedup,
                 lambda new: {
-                    "kept": [c["hit"]["_source"]["chunk_id"] for c in new],
+                    "kept": {c["citation"]: c["hit"]["_source"]["chunk_id"] for c in new},
                     "dropped_already_seen": [
                         c["hit"]["_source"]["chunk_id"] for c in ranked if c not in new
                     ],
@@ -161,7 +166,10 @@ class DocumentQAAgent:
             )
 
             if not new_results:
-                return "(Không có đoạn mới nào -- các đoạn khớp với truy vấn này đã được tìm thấy ở lần tìm kiếm trước.)"
+                return (
+                    "(Không có đoạn mới nào -- các đoạn khớp với truy vấn này đã có trong kết quả "
+                    "các lần tìm kiếm trước; vẫn trích dẫn chúng bằng số cũ.)"
+                )
             return build_context(new_results)
 
         self.model_name = model

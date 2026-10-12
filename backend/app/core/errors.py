@@ -118,7 +118,7 @@ def explain_error(exc: BaseException) -> AppError:
         if type(e).__name__ == "GoogleContextOverflowError":
             return AppError(
                 "Câu hỏi cùng ngữ cảnh vượt quá giới hạn token của model.",
-                "Bắt đầu cuộc trò chuyện mới, hoặc giảm MAX_HISTORY_MESSAGES / RETRIEVAL_FINAL_TOP_N trong .env.",
+                "Bắt đầu cuộc trò chuyện mới, hoặc giảm HISTORY_TOKEN_BUDGET / RETRIEVAL_FINAL_TOP_N trong .env.",
             )
         if isinstance(e, genai_errors.APIError):
             code = e.code

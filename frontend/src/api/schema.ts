@@ -240,7 +240,11 @@ export interface components {
             /** Replace Book Id */
             replace_book_id?: string | null;
         };
-        /** ChatDone */
+        /**
+         * ChatDone
+         * @description The final answer, citations cleaned up (normalized, made-up numbers removed):
+         *     it replaces the streamed text. `cited` = the citation numbers it uses.
+         */
         ChatDone: {
             /**
              * @description discriminator enum property added by openapi-typescript
@@ -254,6 +258,11 @@ export interface components {
              * @default false
              */
             stopped: boolean;
+            /**
+             * Cited
+             * @default []
+             */
+            cited: number[];
         };
         /** ChatRequest */
         ChatRequest: {
@@ -553,8 +562,19 @@ export interface components {
             rerank_score: number;
             /** Text */
             text: string;
+            /** Citation */
+            citation?: number | null;
+            /**
+             * Cited
+             * @default false
+             */
+            cited: boolean;
         };
-        /** Sources */
+        /**
+         * Sources
+         * @description Passages found by a search round, sent right away (citations in the streaming
+         *     answer can be shown immediately). Each event ADDS items; numbers keep increasing.
+         */
         Sources: {
             /**
              * @description discriminator enum property added by openapi-typescript

@@ -628,13 +628,22 @@
             "type": "boolean",
             "title": "Stopped",
             "default": false
+          },
+          "cited": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Cited",
+            "default": []
           }
         },
         "type": "object",
         "required": [
           "answer"
         ],
-        "title": "ChatDone"
+        "title": "ChatDone",
+        "description": "The final answer, citations cleaned up (normalized, made-up numbers removed):\nit replaces the streamed text. `cited` = the citation numbers it uses."
       },
       "ChatRequest": {
         "properties": {
@@ -1442,6 +1451,22 @@
           "text": {
             "type": "string",
             "title": "Text"
+          },
+          "citation": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Citation"
+          },
+          "cited": {
+            "type": "boolean",
+            "title": "Cited",
+            "default": false
           }
         },
         "type": "object",
@@ -1474,7 +1499,8 @@
         "required": [
           "items"
         ],
-        "title": "Sources"
+        "title": "Sources",
+        "description": "Passages found by a search round, sent right away (citations in the streaming\nanswer can be shown immediately). Each event ADDS items; numbers keep increasing."
       },
       "TableInfo": {
         "properties": {

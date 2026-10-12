@@ -1,11 +1,21 @@
 import { useState, type ReactNode } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-export function Markdown({ children, className = "" }: { children: string; className?: string }) {
+export function Markdown({
+  children,
+  className = "",
+  components,
+}: {
+  children: string;
+  className?: string;
+  components?: Components;
+}) {
   return (
     <div className={`markdown ${className}`}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+        {children}
+      </ReactMarkdown>
     </div>
   );
 }

@@ -90,7 +90,7 @@ class Settings:
     embed_max_length: int
 
     # --- App ---
-    max_history_messages: int
+    history_token_budget: int  # earlier turns sent with a question, in (estimated) tokens; 0 = none
     agent_recursion_limit: int  # max graph steps per question (one search round = 2 steps)
     chat_db_path: Path
     trace_name: str
@@ -122,7 +122,7 @@ class Settings:
             chunk_overlap_ratio=_float("CHUNK_OVERLAP_RATIO", 0.15),
             embed_batch_size=_int("EMBED_BATCH_SIZE", 8),
             embed_max_length=_int("EMBED_MAX_LENGTH", 8192),
-            max_history_messages=_int("MAX_HISTORY_MESSAGES", 6),
+            history_token_budget=_int("HISTORY_TOKEN_BUDGET", 3000),
             agent_recursion_limit=_int("AGENT_RECURSION_LIMIT", 25),
             chat_db_path=_path("CHAT_DB_PATH", "chat_history.db"),
             trace_name=_str("TRACE_NAME", "document-qa"),
@@ -142,8 +142,8 @@ class Settings:
                 errors.append(f"{name.upper()} must be > 0 (got {getattr(self, name)})")
         if self.es_max_retries < 0:
             errors.append(f"ES_MAX_RETRIES must be >= 0 (got {self.es_max_retries})")
-        if self.max_history_messages < 0:
-            errors.append(f"MAX_HISTORY_MESSAGES must be >= 0 (got {self.max_history_messages})")
+        if self.history_token_budget < 0:
+            errors.append(f"HISTORY_TOKEN_BUDGET must be >= 0 (got {self.history_token_budget})")
         if self.model_device not in {"auto", "cuda", "cpu"}:
             errors.append(f"MODEL_DEVICE must be auto, cuda or cpu (got {self.model_device!r})")
         if not 0 <= self.llm_temperature <= 2:

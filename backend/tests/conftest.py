@@ -73,7 +73,8 @@ class FakeAgent:
     def __init__(self):
         self.fail = None
         self.token_delay = 0.0
-        self.answer_tokens = ["Gatsby ", "là ", "một ", "triệu phú ", "bí ẩn."]
+        # cites passage [1], plus a made-up [7] that must be removed
+        self.answer_tokens = ["Gatsby ", "là ", "một ", "triệu phú [1]", " bí ẩn [7]."]
         self.histories = []
 
     def stream(self, query_text, ctx, history=None):
@@ -84,12 +85,14 @@ class FakeAgent:
         ]}
         if self.fail:
             raise self.fail
-        ctx.calls.append({"query": "Gatsby là ai", "num_hits": 1})
-        ctx.sources.append({
-            "hit": {"_source": {"type": "paragraph", "book_title": "The Great Gatsby", "chapter_title": "I",
-                                "section_title": None, "chunk_id": "gatsby-ch01-c001", "text": "In my younger..."}},
-            "rerank_score": 0.93, "rrf_score": 0.03,
-        })
+        ctx.calls.append({"query": "Gatsby là ai", "num_hits": 2})
+        for n, (chunk_id, text) in enumerate([("gatsby-ch01-c001", "In my younger..."),
+                                              ("gatsby-ch03-c010", "There was music...")], start=1):
+            ctx.sources.append({
+                "hit": {"_source": {"type": "paragraph", "book_title": "The Great Gatsby", "chapter_title": "I",
+                                    "section_title": None, "chunk_id": chunk_id, "text": text}},
+                "rerank_score": 0.93, "rrf_score": 0.03, "citation": n,  # numbered like search_documents does
+            })
         yield {"type": "update", "node": "tools", "messages": []}
         for t in self.answer_tokens:
             if self.token_delay:

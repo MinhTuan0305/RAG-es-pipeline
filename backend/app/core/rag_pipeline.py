@@ -413,13 +413,13 @@ def retrieve(es, embed_model, reranker, query, *, book_id=None, params=Retrieval
 
 
 def build_context(results):
+    """The passages as the LLM reads them, each headed by the number to cite it with
+    ("citation", assigned per question by the agent; falls back to its position)."""
     blocks = []
     for i, c in enumerate(results, start=1):
         src = c["hit"]["_source"]
-        kind = "Bảng" if src.get("type") == "table" else "Đoạn"
-        blocks.append(
-            f"[{kind} {i} - Tài liệu: {src['book_title']} - {chunk_location(src)}, chunk_id={src['chunk_id']}]\n{src['text']}"
-        )
+        kind = " (Bảng)" if src.get("type") == "table" else ""
+        blocks.append(f"[{c.get('citation', i)}]{kind} Tài liệu: {src['book_title']} - {chunk_location(src)}\n{src['text']}")
     return "\n\n".join(blocks)
 
 

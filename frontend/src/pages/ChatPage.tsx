@@ -1,10 +1,20 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type RefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type RefObject,
+} from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { api, toApiError, type ApiError } from "../api/client";
 import { streamChat } from "../api/chatStream";
 import type { ChatEvent, Message, SourceRecord } from "../api/types";
 import { useAppData } from "../appData";
+import { citationComponents, linkCitations } from "../components/citations";
 import { Collapsible, ConfirmButton, ErrorNotice, Markdown } from "../components/ui";
 
 interface Step {
@@ -159,11 +169,25 @@ export function ChatPage() {
             updateAnswer((m) => ({ ...m, content: m.content + event.text }));
             break;
           case "sources":
-            updateAnswer((m) => ({ ...m, sources: event.items }));
+            // Each search round ADDS its passages (numbered), as soon as it's done.
+            updateAnswer((m) => {
+              const known = new Set(m.sources.map((s) => s.chunk_id));
+              return { ...m, sources: [...m.sources, ...event.items.filter((s) => !known.has(s.chunk_id))] };
+            });
             break;
-          case "done":
-            updateAnswer((m) => ({ ...m, content: event.answer, stopped: event.stopped, streaming: false }));
+          case "done": {
+            // The final answer replaces the streamed text: its citations are cleaned up
+            // (made-up numbers removed), and `cited` says which sources it uses.
+            const cited = new Set(event.cited ?? []);
+            updateAnswer((m) => ({
+              ...m,
+              content: event.answer,
+              stopped: event.stopped,
+              streaming: false,
+              sources: m.sources.map((s) => ({ ...s, cited: s.citation != null && cited.has(s.citation) })),
+            }));
             break;
+          }
           case "error":
             updateAnswer((m) => ({
               ...m, streaming: false, errorMarkdown: `**${event.message}**${event.hint ? `\n\n${event.hint}` : ""}`,
@@ -266,6 +290,31 @@ export function ChatPage() {
 
 function AssistantMessage({ message: m }: { message: ViewMessage }) {
   const thinking = m.streaming && !m.content;
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [highlighted, setHighlighted] = useState<number | null>(null);
+
+  const byNumber = useMemo(() => {
+    const map = new Map<number, SourceRecord>();
+    for (const s of m.sources) if (s.citation != null) map.set(s.citation, s);
+    return map;
+  }, [m.sources]);
+
+  // Clicking a citation badge opens the sources list and scrolls to that source.
+  const openSource = useCallback(
+    (n: number) => {
+      setSourcesOpen(true);
+      setHighlighted(n);
+      requestAnimationFrame(() =>
+        document.getElementById(`src-${m.key}-${n}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" }),
+      );
+      window.setTimeout(() => setHighlighted((h) => (h === n ? null : h)), 1600);
+    },
+    [m.key],
+  );
+
+  const components = useMemo(() => citationComponents(byNumber, openSource), [byNumber, openSource]);
+  const answer = useMemo(() => linkCitations(m.content, new Set(byNumber.keys())), [m.content, byNumber]);
+
   return (
     <div className="msg-assistant">
       {m.steps.length > 0 && (
@@ -284,7 +333,11 @@ function AssistantMessage({ message: m }: { message: ViewMessage }) {
       )}
 
       {thinking && <span className="muted">{m.steps.length ? "Đang tổng hợp câu trả lời..." : "Đang suy nghĩ..."}</span>}
-      {m.content && <Markdown className={`answer${m.streaming ? " streaming" : ""}`}>{m.content}</Markdown>}
+      {m.content && (
+        <Markdown className={`answer${m.streaming ? " streaming" : ""}`} components={components}>
+          {answer}
+        </Markdown>
+      )}
       {m.errorMarkdown && (
         <div className="notice error" role="alert">
           <Markdown>{m.errorMarkdown}</Markdown>
@@ -294,25 +347,84 @@ function AssistantMessage({ message: m }: { message: ViewMessage }) {
 
       {!m.streaming && m.scope && <span className="muted small">Phạm vi tìm kiếm: {m.scope}</span>}
       {m.sources.length > 0 && (
-        <Collapsible summary={`Nguồn trích dẫn (${m.sources.length} đoạn)`}>
-          {m.sources.map((s) => (
-            <SourceItem key={s.chunk_id} source={s} />
-          ))}
-        </Collapsible>
+        <SourcesPanel
+          message={m}
+          open={sourcesOpen}
+          onToggle={setSourcesOpen}
+          highlighted={highlighted}
+        />
       )}
     </div>
   );
 }
 
+/** Sources of one answer. Once the answer is complete, the ones it cites come first
+ * (by number) and the ones found but not used are listed separately. Saved answers
+ * from before citations existed (no numbers) are listed as before. */
+function SourcesPanel({
+  message: m,
+  open,
+  onToggle,
+  highlighted,
+}: {
+  message: ViewMessage;
+  open: boolean;
+  onToggle: (open: boolean) => void;
+  highlighted: number | null;
+}) {
+  const numbered = m.sources.some((s) => s.citation != null);
+  const byNumber = (a: SourceRecord, b: SourceRecord) => (a.citation ?? 0) - (b.citation ?? 0);
+  const grouped = numbered && !m.streaming;
+  const cited = grouped ? m.sources.filter((s) => s.cited).sort(byNumber) : [...m.sources].sort(byNumber);
+  const unused = grouped ? m.sources.filter((s) => !s.cited).sort(byNumber) : [];
+
+  const summary = grouped
+    ? `Nguồn trích dẫn (${cited.length} được trích dẫn${unused.length ? `, ${unused.length} không dùng` : ""})`
+    : `Nguồn trích dẫn (${m.sources.length} đoạn)`;
+
+  const item = (s: SourceRecord) => (
+    <SourceItem
+      key={s.chunk_id}
+      source={s}
+      anchorId={s.citation != null ? `src-${m.key}-${s.citation}` : undefined}
+      highlighted={s.citation != null && s.citation === highlighted}
+    />
+  );
+
+  return (
+    <details className="collapsible" open={open} onToggle={(e) => onToggle(e.currentTarget.open)}>
+      <summary>{summary}</summary>
+      <div className="collapsible-body">
+        {cited.map(item)}
+        {unused.length > 0 && (
+          <div className="sources-unused">
+            <div className="sources-group-label">Tìm thấy nhưng không dùng trong câu trả lời</div>
+            {unused.map(item)}
+          </div>
+        )}
+      </div>
+    </details>
+  );
+}
+
 const PREVIEW_CHARS = 300;
 
-function SourceItem({ source: s }: { source: SourceRecord }) {
+function SourceItem({
+  source: s,
+  anchorId,
+  highlighted,
+}: {
+  source: SourceRecord;
+  anchorId?: string;
+  highlighted: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
   const isTable = s.type === "table";
   const isLong = s.text.length > PREVIEW_CHARS;
   return (
-    <div className="source">
+    <div className={`source${highlighted ? " flash" : ""}`} id={anchorId}>
       <div>
+        {s.citation != null && <span className="source-label">[{s.citation}]</span>}
         <strong>{s.book_title}</strong> — {s.location}
         {isTable && <span className="muted"> · bảng</span>}
       </div>

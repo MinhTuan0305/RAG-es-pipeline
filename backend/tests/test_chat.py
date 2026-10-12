@@ -17,23 +17,26 @@ def ask(client, **body):
 def test_chat_event_sequence_and_saved_history(client):
     events = ask(client, message="Gatsby là ai?")
     types = [e for e, _, _ in events]
-    assert types == ["run_started", "token", "answer_reset", "tool_call", "tool_result",
-                     "token", "token", "token", "token", "token", "sources", "done"]
+    assert types == ["run_started", "token", "answer_reset", "tool_call", "tool_result", "sources",
+                     "token", "token", "token", "token", "token", "done"]
     started = events[0][1]
     assert started["title"] == "Gatsby là ai?"
     assert events[3][1] == {"type": "tool_call", "step": 1, "query": "Gatsby là ai"}
-    assert events[4][1]["num_hits"] == 1
-    sources = events[-2][1]["items"]
-    assert sources[0]["chunk_id"] == "gatsby-ch01-c001" and sources[0]["location"] == "Chapter I"
+    assert events[4][1]["num_hits"] == 2
+    # sources arrive right after their search, numbered, before the answer streams
+    sources = events[5][1]["items"]
+    assert [(s["citation"], s["chunk_id"]) for s in sources] == [(1, "gatsby-ch01-c001"), (2, "gatsby-ch03-c010")]
+    assert sources[0]["location"] == "Chapter I"
     done = events[-1][1]
-    assert done == {"type": "done", "answer": "Gatsby là một triệu phú bí ẩn.", "stopped": False}
+    # the made-up [7] is removed; [1] is kept and reported as cited
+    assert done == {"type": "done", "answer": "Gatsby là một triệu phú [1] bí ẩn.", "stopped": False, "cited": [1]}
 
     detail = client.get(f"/api/conversations/{started['conversation_id']}").json()
     assert [m["role"] for m in detail["messages"]] == ["user", "assistant"]
     assistant = detail["messages"][1]
     assert assistant["content"] == done["answer"]
-    assert assistant["tool_calls"] == [{"query": "Gatsby là ai", "num_hits": 1}]
-    assert assistant["sources"][0]["chunk_id"] == "gatsby-ch01-c001"
+    assert assistant["tool_calls"] == [{"query": "Gatsby là ai", "num_hits": 2}]
+    assert [(s["citation"], s["cited"]) for s in assistant["sources"]] == [(1, True), (2, False)]
 
 
 def test_follow_up_sends_history_and_keeps_conversation(client, fakes):
@@ -43,7 +46,7 @@ def test_follow_up_sends_history_and_keeps_conversation(client, fakes):
     assert second[0][1] == {"type": "run_started", "conversation_id": conv, "title": None}
     assert fakes["agent"].histories[-1] == [
         {"role": "user", "content": "Gatsby là ai?"},
-        {"role": "assistant", "content": "Gatsby là một triệu phú bí ẩn."},
+        {"role": "assistant", "content": "Gatsby là một triệu phú bí ẩn."},  # citations stripped
     ]
     assert len(client.get("/api/conversations").json()) == 1
 
