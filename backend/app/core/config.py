@@ -14,7 +14,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-PROJECT_DIR = Path(__file__).parent
+# The repository root (backend/app/core/config.py -> 3 levels up): .env and the
+# default chat_history.db live there, shared by every entry point.
+PROJECT_DIR = Path(__file__).resolve().parents[3]
 
 load_dotenv(PROJECT_DIR / ".env")
 

@@ -12,8 +12,8 @@ The LLM itself decides how many times to call search_documents and with what que
 including splitting a complex question into several narrower searches (query
 decomposition) -- instead of a fixed single retrieve-then-answer pass.
 
-Run directly for debugging, outside Streamlit:
-    python langgraph_agent.py
+Run directly for debugging, outside the API (from the backend/ folder):
+    python -m app.core.langgraph_agent
 """
 
 import os
@@ -27,9 +27,9 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
-from config import settings
-from errors import AppError, explain_error
-from rag_pipeline import (
+from app.core.config import settings
+from app.core.errors import AppError, explain_error
+from app.core.rag_pipeline import (
     EMBED_MODEL_NAME,
     GEMINI_MODEL,
     RERANKER_MODEL_NAME,
@@ -40,7 +40,7 @@ from rag_pipeline import (
     load_reranker,
     retrieve,
 )
-from tracing import flush, make_callback_handler, traced_step
+from app.core.tracing import flush, make_callback_handler, traced_step
 
 TRACE_NAME = settings.trace_name
 
@@ -322,5 +322,5 @@ if __name__ == "__main__":
             print(f"  - {src['chunk_id']} (Chapter {src['chapter_title']}, rerank_score={c['rerank_score']:.4f})")
 
     # Langfuse sends traces in the background in batches -- send what's left before
-    # this short-lived script exits (the long-running Streamlit app doesn't need this).
+    # this short-lived script exits (the API flushes on shutdown).
     flush()

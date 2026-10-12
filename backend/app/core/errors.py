@@ -9,7 +9,7 @@ exception stays chained (`raise explain_error(e) from e`), so logs keep the full
 traceback.
 """
 
-from config import settings
+from app.core.config import settings
 
 
 class AppError(Exception):
@@ -22,6 +22,15 @@ class AppError(Exception):
 
     def to_markdown(self) -> str:
         return f"**{self.message}**" + (f"\n\n{self.hint}" if self.hint else "")
+
+
+class ApiError(AppError):
+    """An AppError caused by the request itself (not found, invalid input, ...);
+    the API returns it with this HTTP status instead of 500."""
+
+    def __init__(self, status_code: int, message: str, hint: str | None = None):
+        super().__init__(message, hint)
+        self.status_code = status_code
 
 
 class ModelRunError(AppError):

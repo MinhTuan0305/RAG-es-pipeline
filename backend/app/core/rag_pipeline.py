@@ -1,5 +1,6 @@
 import gc
 import logging
+import threading
 import time
 from dataclasses import dataclass
 
@@ -7,9 +8,9 @@ import torch
 from elasticsearch import Elasticsearch, NotFoundError
 from FlagEmbedding import BGEM3FlagModel, FlagReranker
 
-from config import settings
-from errors import MEMORY_HINT, ModelRunError, is_memory_error
-from es_index import ES_HOST, INDEX_MAPPING, INDEX_NAME, ensure_index_exists, versioned_index  # noqa: F401 (re-exported)
+from app.core.config import settings
+from app.core.errors import MEMORY_HINT, ModelRunError, is_memory_error
+from app.core.es_index import ES_HOST, INDEX_MAPPING, INDEX_NAME, ensure_index_exists, versioned_index  # noqa: F401 (re-exported)
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,12 @@ SOURCE_EXCLUDES = {"excludes": ["embedding", "sparse_embedding"]}
 
 # kNN looks at k * this many candidates per shard before picking the top k.
 KNN_CANDIDATES_FACTOR = 5
+
+# One model run at a time on the (single, small) GPU: a chat question and a document
+# being embedded in the background must not both allocate VRAM at once. Held per
+# encode()/compute_score() call, i.e. per batch, so questions still get through
+# between the batches of a long embedding job.
+MODEL_LOCK = threading.RLock()
 
 
 def get_device():
@@ -92,6 +99,11 @@ def _model_failure(what, exc, run_one) -> ModelRunError:
 def _encode(embed_model, texts, max_length=None, **kwargs):
     """embed_model.encode() that raises ModelRunError (with the real cause) instead of
     FlagEmbedding's masked error."""
+    with MODEL_LOCK:
+        return _encode_locked(embed_model, texts, max_length, **kwargs)
+
+
+def _encode_locked(embed_model, texts, max_length, **kwargs):
     try:
         return embed_model.encode(
             texts, max_length=max_length, return_dense=True, return_sparse=True, return_colbert_vecs=False, **kwargs,
@@ -170,6 +182,12 @@ def list_documents(es):
     return sorted(_document_summaries(es), key=lambda d: d["book_title"].lower())
 
 
+def get_document(es, book_id):
+    """Summary of one indexed document (see _document_summaries), or None."""
+    docs = _document_summaries(es, query={"term": {"book_id": book_id}})
+    return docs[0] if docs else None
+
+
 def find_document_by_hash(es, file_hash=None, content_hash=None):
     """The already-indexed document with this file or content fingerprint, as a
     summary (see _document_summaries) plus "matched": "file" | "content"; None if no
@@ -238,8 +256,20 @@ def rerank(reranker, query_text, candidates, top_n=settings.final_top_n):
     if not candidates:
         return []
     pairs = [[query_text, c["hit"]["_source"]["text"]] for c in candidates]
+    with MODEL_LOCK:
+        scores = _compute_scores_locked(reranker, pairs)
+    if not isinstance(scores, list):
+        scores = [scores]  # compute_score returns a bare float for a single pair
+
+    for c, score in zip(candidates, scores):
+        c["rerank_score"] = score
+
+    return sorted(candidates, key=lambda c: -c["rerank_score"])[:top_n]
+
+
+def _compute_scores_locked(reranker, pairs):
     try:
-        scores = reranker.compute_score(pairs, normalize=True, max_length=settings.rerank_max_length)
+        return reranker.compute_score(pairs, normalize=True, max_length=settings.rerank_max_length)
     except (RuntimeError, MemoryError, AttributeError) as e:
         if isinstance(e, AttributeError) and not _is_flag_masked_failure(e):
             raise
@@ -253,13 +283,6 @@ def rerank(reranker, query_text, candidates, top_n=settings.final_top_n):
             reranker.model(**inputs, return_dict=True)
 
         raise _model_failure(f"model rerank ({_model_label(RERANKER_MODEL_NAME)})", e, run_one) from e
-    if not isinstance(scores, list):
-        scores = [scores]  # compute_score returns a bare float for a single pair
-
-    for c, score in zip(candidates, scores):
-        c["rerank_score"] = score
-
-    return sorted(candidates, key=lambda c: -c["rerank_score"])[:top_n]
 
 
 # ---------------------------------------------------------------- retrieval (single entry point)
