@@ -255,7 +255,9 @@ def reciprocal_rank_fusion(result_lists, k=settings.rrf_k):
 def rerank(reranker, query_text, candidates, top_n=settings.final_top_n):
     if not candidates:
         return []
-    pairs = [[query_text, c["hit"]["_source"]["text"]] for c in candidates]
+    # The reranker reads each passage with its document/location line too: the same
+    # context that helps retrieval helps it judge relevance.
+    pairs = [[query_text, passage_with_context(c["hit"]["_source"])] for c in candidates]
     with MODEL_LOCK:
         scores = _compute_scores_locked(reranker, pairs)
     if not isinstance(scores, list):
@@ -334,6 +336,28 @@ def chunk_location(src) -> str:
     if src.get("section_title"):
         location += f" > {src['section_title']}"
     return location
+
+
+EMBED_FORMAT_CONTEXTUAL = "contextual-v1"
+EMBED_FORMAT_PLAIN = "plain"
+
+
+def current_embed_format() -> str:
+    return EMBED_FORMAT_CONTEXTUAL if settings.embed_context_header else EMBED_FORMAT_PLAIN
+
+
+def passage_with_context(src) -> str:
+    """The text a passage is embedded and reranked as: a first line naming its document
+    and chapter/section, then the passage itself (contextual chunk header).
+
+    A passage under "3.2. Chính sách nghỉ phép" rarely repeats those words, so on its
+    own neither the dense vector nor the sparse tokens know what it's about; with the
+    header, a question about leave policy finds it. The stored `text` stays as is: it's
+    what the UI shows, and build_context gives the LLM the same information in its own
+    header line. EMBED_CONTEXT_HEADER=false falls back to the bare text."""
+    if not settings.embed_context_header:
+        return src["text"]
+    return f"{src['book_title']} — {chunk_location(src)}\n{src['text']}"
 
 
 def _hit_row(rank, hit, **scores):
@@ -425,10 +449,12 @@ def build_context(results):
 
 def embed_chunks_batch(embed_model, chunks, batch_size=settings.embed_batch_size,
                        max_length=settings.embed_max_length, on_progress=None, on_retry=None):
-    """Embed a list of chunk dicts (each with a "text" key) in place -- adds
-    "embedding" (dense) and "sparse_embedding" (lexical weights) to every chunk.
-    Used when indexing a new document, as opposed to embed_query() which embeds a
-    single query string at search time.
+    """Embed a list of chunk dicts in place -- adds "embedding" (dense),
+    "sparse_embedding" (lexical weights) and "embed_format" to every chunk. Each chunk
+    is embedded as passage_with_context(chunk) (its "text" plus, by default, a
+    document/location header), so chunks need book_title/chapter_title/section_title.
+    Used when indexing a document, as opposed to embed_query() which embeds a single
+    query string at search time.
 
     Chunks are sent to the model batch_size at a time (one encode() call per batch),
     so on_progress(done, total) can be called after each batch, e.g. to drive a
@@ -440,11 +466,12 @@ def embed_chunks_batch(embed_model, chunks, batch_size=settings.embed_batch_size
     chunk still doesn't fit is the ModelRunError raised. Any other failure is raised
     right away -- retrying wouldn't help."""
     total = len(chunks)
+    embed_format = current_embed_format()
     start, size, retries = 0, batch_size, 0
     while start < total:
         batch = chunks[start:start + size]
         try:
-            output = _encode(embed_model, [c["text"] for c in batch], max_length=max_length, batch_size=size)
+            output = _encode(embed_model, [passage_with_context(c) for c in batch], max_length=max_length, batch_size=size)
         except ModelRunError as e:
             if not e.is_memory or size == 1:
                 raise
@@ -463,6 +490,7 @@ def embed_chunks_batch(embed_model, chunks, batch_size=settings.embed_batch_size
         for chunk, dense_vec, sparse in zip(batch, output["dense_vecs"], raw_sparse_list):
             chunk["embedding"] = [float(x) for x in dense_vec]
             chunk["sparse_embedding"] = {k.replace(".", "·"): float(v) for k, v in sparse.items()}
+            chunk["embed_format"] = embed_format
 
         start += len(batch)
         if on_progress:

@@ -69,6 +69,12 @@ python backend/scripts/index_admin.py delete document-chunks-v1  # xoá version 
 
 Thêm field mới vào mapping thì không cần reindex: backend tự cập nhật ở lần upload tiếp theo.
 
+Đổi **cách embed** (bật/tắt `EMBED_CONTEXT_HEADER`, đổi model embedding) thì phải embed lại toàn bộ kho; `reindex` không làm được vì nó chỉ copy vector cũ. Tắt backend rồi chạy:
+
+```bash
+python backend/scripts/reembed.py            # embed lại sang version mới, chuyển alias, giữ bản cũ để rollback
+```
+
 ## Cấu trúc
 
 | Đường dẫn | Vai trò |
