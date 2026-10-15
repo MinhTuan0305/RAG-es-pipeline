@@ -17,14 +17,13 @@ where a block is one of
 """
 
 import hashlib
-import html
 import re
 import threading
 import unicodedata
 import uuid
 from pathlib import Path
 
-from config import settings
+from app.core.config import settings
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".html", ".htm", ".md"}
 
@@ -313,7 +312,7 @@ def ingest_document(file_path, filename: str) -> dict:
     return {"tree": tree, "metadata": metadata, "content_hash": tree_content_hash(tree)}
 
 
-# ---------------------------------------------------------------- tree helpers (review UI)
+# ---------------------------------------------------------------- tree helpers (review step)
 
 def iter_nodes(node):
     yield node
@@ -353,58 +352,3 @@ def drop_tables(tree, table_ids: set) -> dict:
         "blocks": [b for b in tree["blocks"] if not (b["type"] == "table" and b["table_id"] in table_ids)],
         "children": [drop_tables(c, table_ids) for c in tree["children"]],
     }
-
-
-def tree_html(tree) -> str:
-    """The heading tree as nested, collapsible <details> HTML (Streamlit can't nest
-    expanders). Top-level sections start open, deeper ones collapsed; every heading
-    shows how many paragraphs/tables sit directly under it, and tables are listed at
-    their actual position. Colors inherit from the page so it works in dark mode."""
-    def badge(node):
-        n_par = sum(b["type"] == "paragraph" for b in node["blocks"])
-        n_tab = sum(b["type"] == "table" for b in node["blocks"])
-        parts = []
-        if n_par:
-            parts.append(f"{n_par} đoạn")
-        if n_tab:
-            parts.append(f"{n_tab} bảng")
-        if node["children"]:
-            parts.append(f"{len(node['children'])} mục con")
-        return f"<span class='dt-meta'>{' · '.join(parts) or 'trống'}</span>"
-
-    def table_lines(node):
-        out = []
-        for b in node["blocks"]:
-            if b["type"] == "table":
-                name = html.escape(b["caption"] or f"Bảng {b['table_id'][1:]}")
-                dims = f"{len(b['rows'])} hàng × {len(b['header'])} cột"
-                out.append(f"<div class='dt-table'>Bảng: {name} <span class='dt-meta'>{dims}</span></div>")
-        return "".join(out)
-
-    def render(node, level):
-        title = html.escape(node["title"])
-        body = table_lines(node) + "".join(render(c, level + 1) for c in node["children"])
-        if not body:
-            return f"<div class='dt-leaf'>{title} {badge(node)}</div>"
-        open_attr = " open" if level == 0 else ""
-        return (
-            f"<details{open_attr}><summary>{title} {badge(node)}</summary>"
-            f"<div class='dt-children'>{body}</div></details>"
-        )
-
-    intro = ""
-    if tree["blocks"]:
-        intro = (
-            f"<div class='dt-leaf'><i>(Phần mở đầu, trước tiêu đề đầu tiên)</i> {badge(tree)}</div>"
-            + table_lines(tree)
-        )
-    style = """<style>
-.dt-tree { font-size: 0.92rem; line-height: 1.7; }
-.dt-tree summary { cursor: pointer; }
-.dt-tree summary::marker { color: currentColor; opacity: 0.5; }
-.dt-children { margin-left: 0.6rem; padding-left: 0.9rem; border-left: 1px solid rgba(128,128,128,0.35); }
-.dt-leaf { padding-left: 1.05rem; }
-.dt-table { padding-left: 1.05rem; font-style: italic; }
-.dt-meta { opacity: 0.6; font-size: 0.82rem; font-style: normal; margin-left: 0.35rem; }
-</style>"""
-    return style + "<div class='dt-tree'>" + intro + "".join(render(c, 0) for c in tree["children"]) + "</div>"

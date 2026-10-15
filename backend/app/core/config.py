@@ -14,7 +14,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-PROJECT_DIR = Path(__file__).parent
+# The repository root (backend/app/core/config.py -> 3 levels up): .env and the
+# default chat_history.db live there, shared by every entry point.
+PROJECT_DIR = Path(__file__).resolve().parents[3]
 
 load_dotenv(PROJECT_DIR / ".env")
 
@@ -58,6 +60,8 @@ class Settings:
     # --- Elasticsearch ---
     es_host: str
     es_index: str  # the alias every query goes through (see es_index.py / index_admin.py)
+    es_timeout: float  # seconds per request
+    es_max_retries: int  # on connection errors / timeouts / 429-5xx
 
     # --- Models ---
     embed_model: str
@@ -65,6 +69,8 @@ class Settings:
     reranker_model: str
     llm_model: str
     llm_temperature: float
+    llm_timeout: float  # seconds per Gemini request
+    llm_max_retries: int  # attempts incl. the first, with exponential backoff on 408/429/5xx
     model_device: str  # auto | cuda | cpu
 
     # --- Retrieval (per search_documents call) ---
@@ -84,7 +90,8 @@ class Settings:
     embed_max_length: int
 
     # --- App ---
-    max_history_messages: int
+    history_token_budget: int  # earlier turns sent with a question, in (estimated) tokens; 0 = none
+    agent_recursion_limit: int  # max graph steps per question (one search round = 2 steps)
     chat_db_path: Path
     trace_name: str
 
@@ -93,11 +100,15 @@ class Settings:
         return cls(
             es_host=_str("ES_HOST", "http://localhost:9200"),
             es_index=_str("ES_INDEX", "document-chunks"),
+            es_timeout=_float("ES_TIMEOUT", 30),
+            es_max_retries=_int("ES_MAX_RETRIES", 3),
             embed_model=_str("EMBED_MODEL", "BAAI/bge-m3"),
             embed_dims=_int("EMBED_DIMS", 1024),
             reranker_model=_str("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3"),
             llm_model=_str("LLM_MODEL", "gemini-2.5-flash"),
             llm_temperature=_float("LLM_TEMPERATURE", 0.2),
+            llm_timeout=_float("LLM_TIMEOUT", 60),
+            llm_max_retries=_int("LLM_MAX_RETRIES", 3),
             model_device=_str("MODEL_DEVICE", "auto").lower(),
             dense_k=_int("RETRIEVAL_DENSE_K", 20),
             sparse_k=_int("RETRIEVAL_SPARSE_K", 20),
@@ -111,7 +122,8 @@ class Settings:
             chunk_overlap_ratio=_float("CHUNK_OVERLAP_RATIO", 0.15),
             embed_batch_size=_int("EMBED_BATCH_SIZE", 8),
             embed_max_length=_int("EMBED_MAX_LENGTH", 8192),
-            max_history_messages=_int("MAX_HISTORY_MESSAGES", 6),
+            history_token_budget=_int("HISTORY_TOKEN_BUDGET", 3000),
+            agent_recursion_limit=_int("AGENT_RECURSION_LIMIT", 25),
             chat_db_path=_path("CHAT_DB_PATH", "chat_history.db"),
             trace_name=_str("TRACE_NAME", "document-qa"),
         )
@@ -123,12 +135,15 @@ class Settings:
             "embed_dims", "dense_k", "sparse_k", "fused_top_n", "final_top_n", "sparse_top_tokens",
             "rrf_k", "rerank_max_length", "chunk_target_tokens", "chunk_max_tokens",
             "embed_batch_size", "embed_max_length",
+            "es_timeout", "llm_timeout", "llm_max_retries", "agent_recursion_limit",
         ]
         for name in positive:
             if getattr(self, name) <= 0:
                 errors.append(f"{name.upper()} must be > 0 (got {getattr(self, name)})")
-        if self.max_history_messages < 0:
-            errors.append(f"MAX_HISTORY_MESSAGES must be >= 0 (got {self.max_history_messages})")
+        if self.es_max_retries < 0:
+            errors.append(f"ES_MAX_RETRIES must be >= 0 (got {self.es_max_retries})")
+        if self.history_token_budget < 0:
+            errors.append(f"HISTORY_TOKEN_BUDGET must be >= 0 (got {self.history_token_budget})")
         if self.model_device not in {"auto", "cuda", "cpu"}:
             errors.append(f"MODEL_DEVICE must be auto, cuda or cpu (got {self.model_device!r})")
         if not 0 <= self.llm_temperature <= 2:

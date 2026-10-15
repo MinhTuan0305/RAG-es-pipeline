@@ -2,8 +2,8 @@ import re
 
 from transformers import AutoTokenizer
 
-from config import settings
-from document_ingest import markdown_row, table_markdown
+from app.core.config import settings
+from app.core.document_ingest import markdown_row, table_markdown
 
 # Token counts must use the embedding model's own tokenizer, so it follows EMBED_MODEL.
 TOKENIZER_NAME = settings.embed_model

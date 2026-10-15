@@ -11,11 +11,13 @@ import os
 
 from langchain_core.runnables import RunnableLambda
 
-import config  # noqa: F401 -- loads .env, so LANGFUSE_* keys are visible even if imported first
+import app.core.config  # noqa: F401 -- loads .env, so LANGFUSE_* keys are visible even if imported first
 
 logger = logging.getLogger(__name__)
 
 _warned = False
+
+DEFAULT_LANGFUSE_TIMEOUT_S = 10
 
 
 def tracing_enabled() -> bool:
@@ -28,6 +30,10 @@ def make_callback_handler():
     global _warned
     if not tracing_enabled():
         return None
+    # Langfuse sends traces from a background thread; with its default timeout a slow
+    # network drops batches ("Failed to export spans batch ... Read timed out").
+    # Allow longer unless LANGFUSE_TIMEOUT is set explicitly.
+    os.environ.setdefault("LANGFUSE_TIMEOUT", str(DEFAULT_LANGFUSE_TIMEOUT_S))
     try:
         from langfuse.langchain import CallbackHandler
     except ImportError as e:

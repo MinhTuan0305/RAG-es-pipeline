@@ -1,11 +1,18 @@
+import gc
+import logging
+import threading
+import time
 from dataclasses import dataclass
 
 import torch
 from elasticsearch import Elasticsearch, NotFoundError
 from FlagEmbedding import BGEM3FlagModel, FlagReranker
 
-from config import settings
-from es_index import ES_HOST, INDEX_MAPPING, INDEX_NAME, ensure_index_exists, versioned_index  # noqa: F401 (re-exported)
+from app.core.config import settings
+from app.core.errors import MEMORY_HINT, ModelRunError, is_memory_error
+from app.core.es_index import ES_HOST, INDEX_MAPPING, INDEX_NAME, ensure_index_exists, versioned_index  # noqa: F401 (re-exported)
+
+logger = logging.getLogger(__name__)
 
 EMBED_MODEL_NAME = settings.embed_model
 RERANKER_MODEL_NAME = settings.reranker_model
@@ -16,6 +23,12 @@ SOURCE_EXCLUDES = {"excludes": ["embedding", "sparse_embedding"]}
 # kNN looks at k * this many candidates per shard before picking the top k.
 KNN_CANDIDATES_FACTOR = 5
 
+# One model run at a time on the (single, small) GPU: a chat question and a document
+# being embedded in the background must not both allocate VRAM at once. Held per
+# encode()/compute_score() call, i.e. per batch, so questions still get through
+# between the batches of a long embedding job.
+MODEL_LOCK = threading.RLock()
+
 
 def get_device():
     if settings.model_device != "auto":
@@ -24,7 +37,14 @@ def get_device():
 
 
 def load_es_client():
-    return Elasticsearch(ES_HOST)
+    # Each request times out after ES_TIMEOUT seconds; connection errors, timeouts and
+    # 429/502/503/504 responses are retried up to ES_MAX_RETRIES times before failing.
+    return Elasticsearch(
+        ES_HOST,
+        request_timeout=settings.es_timeout,
+        max_retries=settings.es_max_retries,
+        retry_on_timeout=True,
+    )
 
 
 def load_embed_model():
@@ -37,13 +57,73 @@ def load_reranker():
     return FlagReranker(RERANKER_MODEL_NAME, use_fp16=(device == "cuda"), device=device)
 
 
+# ---------------------------------------------------------------- running the local models
+#
+# FlagEmbedding hides why a model run failed: on ANY RuntimeError (CUDA out of memory,
+# a failed host-memory allocation, ...) it silently retries with a smaller batch, all
+# the way down to 0, and then crashes with a meaningless
+# "'list' object has no attribute 'keys'". The helpers below catch that, run the model
+# once more on a single input to surface the real error, and raise a ModelRunError
+# saying what actually happened.
+
+def _is_flag_masked_failure(exc) -> bool:
+    return isinstance(exc, AttributeError) and "has no attribute 'keys'" in str(exc)
+
+
+def free_model_memory():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _probe(run_one):
+    """Run a single-input forward pass; return the exception it raises, or None."""
+    try:
+        with torch.no_grad():
+            run_one()
+    except Exception as e:
+        return e
+    return None
+
+
+def _model_failure(what, exc, run_one) -> ModelRunError:
+    cause = _probe(run_one) if _is_flag_masked_failure(exc) else exc
+    cause = cause or exc
+    memory = is_memory_error(cause)
+    logger.warning("%s failed: %r", what, cause)
+    if memory:
+        return ModelRunError(f"Không đủ bộ nhớ để chạy {what}.", MEMORY_HINT, is_memory=True)
+    return ModelRunError(f"Không chạy được {what}: {type(cause).__name__}: {cause}")
+
+
+def _encode(embed_model, texts, max_length=None, **kwargs):
+    """embed_model.encode() that raises ModelRunError (with the real cause) instead of
+    FlagEmbedding's masked error."""
+    with MODEL_LOCK:
+        return _encode_locked(embed_model, texts, max_length, **kwargs)
+
+
+def _encode_locked(embed_model, texts, max_length, **kwargs):
+    try:
+        return embed_model.encode(
+            texts, max_length=max_length, return_dense=True, return_sparse=True, return_colbert_vecs=False, **kwargs,
+        )
+    except (RuntimeError, MemoryError, AttributeError) as e:
+        if isinstance(e, AttributeError) and not _is_flag_masked_failure(e):
+            raise  # a genuine bug, not a model-run failure
+
+        def run_one():
+            device = embed_model.target_devices[0]
+            inputs = embed_model.tokenizer(
+                texts[:1], truncation=True, max_length=max_length or 512, return_tensors="pt",
+            ).to(device)
+            embed_model.model(inputs, return_dense=True, return_sparse=True, return_colbert_vecs=False)
+
+        raise _model_failure(f"model embedding ({_model_label(EMBED_MODEL_NAME)})", e, run_one) from e
+
+
 def embed_query(embed_model, query_text):
-    output = embed_model.encode(
-        [query_text],
-        return_dense=True,
-        return_sparse=True,
-        return_colbert_vecs=False,
-    )
+    output = _encode(embed_model, [query_text])
     dense_vec = [float(x) for x in output["dense_vecs"][0]]
 
     # convert_id_to_token collapses its result to a bare dict (not a 1-item list)
@@ -100,6 +180,12 @@ def _document_summaries(es, query=None):
 def list_documents(es):
     """All documents currently in the index, sorted by title."""
     return sorted(_document_summaries(es), key=lambda d: d["book_title"].lower())
+
+
+def get_document(es, book_id):
+    """Summary of one indexed document (see _document_summaries), or None."""
+    docs = _document_summaries(es, query={"term": {"book_id": book_id}})
+    return docs[0] if docs else None
 
 
 def find_document_by_hash(es, file_hash=None, content_hash=None):
@@ -170,7 +256,8 @@ def rerank(reranker, query_text, candidates, top_n=settings.final_top_n):
     if not candidates:
         return []
     pairs = [[query_text, c["hit"]["_source"]["text"]] for c in candidates]
-    scores = reranker.compute_score(pairs, normalize=True, max_length=settings.rerank_max_length)
+    with MODEL_LOCK:
+        scores = _compute_scores_locked(reranker, pairs)
     if not isinstance(scores, list):
         scores = [scores]  # compute_score returns a bare float for a single pair
 
@@ -178,6 +265,24 @@ def rerank(reranker, query_text, candidates, top_n=settings.final_top_n):
         c["rerank_score"] = score
 
     return sorted(candidates, key=lambda c: -c["rerank_score"])[:top_n]
+
+
+def _compute_scores_locked(reranker, pairs):
+    try:
+        return reranker.compute_score(pairs, normalize=True, max_length=settings.rerank_max_length)
+    except (RuntimeError, MemoryError, AttributeError) as e:
+        if isinstance(e, AttributeError) and not _is_flag_masked_failure(e):
+            raise
+
+        def run_one():
+            device = reranker.target_devices[0]
+            inputs = reranker.tokenizer(
+                [pairs[0][0]], [pairs[0][1]], truncation=True, max_length=settings.rerank_max_length,
+                return_tensors="pt",
+            ).to(device)
+            reranker.model(**inputs, return_dict=True)
+
+        raise _model_failure(f"model rerank ({_model_label(RERANKER_MODEL_NAME)})", e, run_one) from e
 
 
 # ---------------------------------------------------------------- retrieval (single entry point)
@@ -308,18 +413,18 @@ def retrieve(es, embed_model, reranker, query, *, book_id=None, params=Retrieval
 
 
 def build_context(results):
+    """The passages as the LLM reads them, each headed by the number to cite it with
+    ("citation", assigned per question by the agent; falls back to its position)."""
     blocks = []
     for i, c in enumerate(results, start=1):
         src = c["hit"]["_source"]
-        kind = "Bảng" if src.get("type") == "table" else "Đoạn"
-        blocks.append(
-            f"[{kind} {i} - Tài liệu: {src['book_title']} - {chunk_location(src)}, chunk_id={src['chunk_id']}]\n{src['text']}"
-        )
+        kind = " (Bảng)" if src.get("type") == "table" else ""
+        blocks.append(f"[{c.get('citation', i)}]{kind} Tài liệu: {src['book_title']} - {chunk_location(src)}\n{src['text']}")
     return "\n\n".join(blocks)
 
 
 def embed_chunks_batch(embed_model, chunks, batch_size=settings.embed_batch_size,
-                       max_length=settings.embed_max_length, on_progress=None):
+                       max_length=settings.embed_max_length, on_progress=None, on_retry=None):
     """Embed a list of chunk dicts (each with a "text" key) in place -- adds
     "embedding" (dense) and "sparse_embedding" (lexical weights) to every chunk.
     Used when indexing a new document, as opposed to embed_query() which embeds a
@@ -327,18 +432,29 @@ def embed_chunks_batch(embed_model, chunks, batch_size=settings.embed_batch_size
 
     Chunks are sent to the model batch_size at a time (one encode() call per batch),
     so on_progress(done, total) can be called after each batch, e.g. to drive a
-    progress bar."""
+    progress bar.
+
+    Out of memory on a batch: free cached memory, wait (1s, 2s, 4s, ... backoff),
+    halve the batch size and retry the same chunks, down to one chunk at a time;
+    on_retry(new_batch_size, error) is called before each retry. Only when a single
+    chunk still doesn't fit is the ModelRunError raised. Any other failure is raised
+    right away -- retrying wouldn't help."""
     total = len(chunks)
-    for start in range(0, total, batch_size):
-        batch = chunks[start:start + batch_size]
-        output = embed_model.encode(
-            [c["text"] for c in batch],
-            batch_size=batch_size,
-            max_length=max_length,
-            return_dense=True,
-            return_sparse=True,
-            return_colbert_vecs=False,
-        )
+    start, size, retries = 0, batch_size, 0
+    while start < total:
+        batch = chunks[start:start + size]
+        try:
+            output = _encode(embed_model, [c["text"] for c in batch], max_length=max_length, batch_size=size)
+        except ModelRunError as e:
+            if not e.is_memory or size == 1:
+                raise
+            size = max(1, size // 2)
+            free_model_memory()
+            time.sleep(2 ** retries)
+            retries += 1
+            if on_retry:
+                on_retry(size, e)
+            continue
 
         raw_sparse_list = embed_model.convert_id_to_token(output["lexical_weights"])
         if isinstance(raw_sparse_list, dict):
@@ -348,9 +464,11 @@ def embed_chunks_batch(embed_model, chunks, batch_size=settings.embed_batch_size
             chunk["embedding"] = [float(x) for x in dense_vec]
             chunk["sparse_embedding"] = {k.replace(".", "·"): float(v) for k, v in sparse.items()}
 
+        start += len(batch)
         if on_progress:
-            on_progress(min(start + batch_size, total), total)
+            on_progress(start, total)
 
+    free_model_memory()  # hand the activations' VRAM back before the app goes idle
     return chunks
 
 

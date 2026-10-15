@@ -11,7 +11,7 @@ import sqlite3
 import uuid
 from contextlib import closing
 from datetime import datetime, timezone
-from config import settings
+from app.core.config import settings
 
 DB_PATH = settings.chat_db_path
 
@@ -40,7 +40,7 @@ def _now() -> str:
 
 def _connect():
     # A fresh connection per call: cheap for SQLite, and avoids sharing one
-    # connection across the threads Streamlit runs scripts on.
+    # connection across the API's worker threads.
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")  # needed for ON DELETE CASCADE

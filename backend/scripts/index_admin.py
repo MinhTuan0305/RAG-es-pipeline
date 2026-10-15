@@ -1,18 +1,18 @@
 """
 Admin CLI for the versioned indices behind the `document-chunks` alias.
 
-    python index_admin.py status              # alias -> which version, every version + doc count
-    python index_admin.py migrate             # ONE-TIME: legacy concrete index -> document-chunks-v1 + alias
-    python index_admin.py reindex             # new version with the current INDEX_MAPPING, copy data, swap alias
-    python index_admin.py reindex --delete-old
-    python index_admin.py switch document-chunks-v1   # point the alias at another version (rollback)
-    python index_admin.py delete document-chunks-v1   # drop an old version the alias no longer uses
+    python backend/scripts/index_admin.py status              # alias -> which version, every version + doc count
+    python backend/scripts/index_admin.py migrate             # ONE-TIME: legacy concrete index -> document-chunks-v1 + alias
+    python backend/scripts/index_admin.py reindex             # new version with the current INDEX_MAPPING, copy data, swap alias
+    python backend/scripts/index_admin.py reindex --delete-old
+    python backend/scripts/index_admin.py switch document-chunks-v1   # point the alias at another version (rollback)
+    python backend/scripts/index_admin.py delete document-chunks-v1   # drop an old version the alias no longer uses
 
 Typical mapping change (e.g. a different analyzer for `text`):
     1. edit INDEX_MAPPING in es_index.py
-    2. python index_admin.py reindex      -> builds v(N+1), copies every doc, swaps the alias
-    3. check the app; if something is off: python index_admin.py switch <old version>
-    4. once happy: python index_admin.py delete <old version>
+    2. python backend/scripts/index_admin.py reindex      -> builds v(N+1), copies every doc, swaps the alias
+    3. check the app; if something is off: python backend/scripts/index_admin.py switch <old version>
+    4. once happy: python backend/scripts/index_admin.py delete <old version>
 
 Reindex copies `_source`, which still holds both embeddings, so nothing is re-embedded.
 That covers analyzer/field-type/settings changes. Switching to a different embedding
@@ -26,10 +26,13 @@ before the alias swap).
 import argparse
 import re
 import sys
+from pathlib import Path
 
 from elasticsearch import Elasticsearch
 
-from es_index import ES_HOST, INDEX_MAPPING, INDEX_NAME, versioned_index
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # make package "app" (backend/app) importable
+
+from app.core.es_index import ES_HOST, INDEX_MAPPING, INDEX_NAME, versioned_index  # noqa: E402
 
 VERSION_RE = re.compile(rf"^{re.escape(INDEX_NAME)}-v(\d+)$")
 REINDEX_TIMEOUT_S = 3600
@@ -112,7 +115,7 @@ def cmd_status(es, args):
         print(f"alias '{INDEX_NAME}' -> {', '.join(targets)}")
     elif is_legacy_concrete_index(es):
         print(f"'{INDEX_NAME}' is a LEGACY concrete index ({count(es, INDEX_NAME)} docs), not an alias.")
-        print("  run: python index_admin.py migrate")
+        print("  run: python backend/scripts/index_admin.py migrate")
     else:
         print(f"'{INDEX_NAME}' doesn't exist yet (the app creates {versioned_index(1)} + alias on first upload).")
 
@@ -153,7 +156,7 @@ def cmd_migrate(es, args):
 def cmd_reindex(es, args):
     targets = alias_targets(es)
     if not targets:
-        sys.exit(f"'{INDEX_NAME}' is not an alias yet -- run `python index_admin.py migrate` first.")
+        sys.exit(f"'{INDEX_NAME}' is not an alias yet -- run `python backend/scripts/index_admin.py migrate` first.")
     if len(targets) > 1:
         sys.exit(f"alias points at several indices ({targets}) -- fix with `switch` first.")
     current = targets[0]
@@ -178,7 +181,7 @@ def cmd_reindex(es, args):
         es.indices.delete(index=current)
         print(f"Deleted '{current}'.")
     else:
-        print(f"Rollback if needed: python index_admin.py switch {current}")
+        print(f"Rollback if needed: python backend/scripts/index_admin.py switch {current}")
 
 
 def cmd_switch(es, args):

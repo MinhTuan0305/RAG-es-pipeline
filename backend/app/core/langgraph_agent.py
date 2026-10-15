@@ -12,8 +12,8 @@ The LLM itself decides how many times to call search_documents and with what que
 including splitting a complex question into several narrower searches (query
 decomposition) -- instead of a fixed single retrieve-then-answer pass.
 
-Run directly for debugging, outside Streamlit:
-    python langgraph_agent.py
+Run directly for debugging, outside the API (from the backend/ folder):
+    python -m app.core.langgraph_agent
 """
 
 import os
@@ -27,8 +27,9 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
-from config import settings
-from rag_pipeline import (
+from app.core.config import settings
+from app.core.errors import AppError, explain_error
+from app.core.rag_pipeline import (
     EMBED_MODEL_NAME,
     GEMINI_MODEL,
     RERANKER_MODEL_NAME,
@@ -39,7 +40,7 @@ from rag_pipeline import (
     load_reranker,
     retrieve,
 )
-from tracing import flush, make_callback_handler, traced_step
+from app.core.tracing import flush, make_callback_handler, traced_step
 
 TRACE_NAME = settings.trace_name
 
@@ -70,10 +71,10 @@ Bạn có 1 công cụ: `search_documents`, dùng để tìm các đoạn trích
 - Nếu câu hỏi phức tạp hoặc cần thông tin từ nhiều khía cạnh khác nhau (ví dụ so sánh 2 nhân vật, nhiều sự kiện/tài liệu khác nhau), hãy TÁCH thành các câu hỏi con và gọi `search_documents` riêng cho từng câu hỏi con.
 - Nếu kết quả tìm kiếm đầu tiên chưa đủ để trả lời trọn vẹn, hãy gọi lại `search_documents` với một truy vấn khác (diễn đạt lại, hoặc tập trung vào khía cạnh còn thiếu) thay vì trả lời ngay với thông tin chưa đủ.
 - Chỉ trả lời dựa trên nội dung trả về từ `search_documents` -- KHÔNG bịa thêm chi tiết không có trong đó.
-- Một số kết quả là BẢNG (nhãn "[Bảng ...]", nội dung dạng Markdown): đọc đúng theo hàng/cột và trích số liệu chính xác như trong bảng, không làm tròn hay suy diễn thêm. Bảng dài có thể bị chia thành nhiều phần (ghi "phần i/n") -- nếu cần phần còn thiếu thì tìm kiếm thêm.
+- Một số kết quả là BẢNG (nhãn "(Bảng)", nội dung dạng Markdown): đọc đúng theo hàng/cột và trích số liệu chính xác như trong bảng, không làm tròn hay suy diễn thêm. Bảng dài có thể bị chia thành nhiều phần (ghi "phần i/n") -- nếu cần phần còn thiếu thì tìm kiếm thêm.
 - Mỗi đoạn trích đều ghi rõ tên tài liệu nguồn -- nếu kết quả có đoạn từ nhiều tài liệu khác nhau, hãy phân biệt rõ thông tin nào đến từ tài liệu nào, không gộp lẫn.
 - Nếu sau khi tìm kiếm vẫn không có đủ thông tin, hãy nói rõ là không tìm thấy trong kho tài liệu, đừng đoán bừa.
-- Khi trả lời, trích dẫn tên tài liệu và chương/mục liên quan (ví dụ: "(The Great Gatsby, Chapter III)") cho các chi tiết quan trọng.
+- TRÍCH DẪN NGUỒN: mỗi đoạn trích có một số trong ngoặc vuông, ví dụ "[3]". Đặt số đó ngay sau mỗi ý/câu lấy từ đoạn trích, ví dụ: "Gatsby tổ chức tiệc mỗi cuối tuần [2]." Một ý dựa trên nhiều đoạn thì viết liền: [1][4]. Chỉ dùng các số đã xuất hiện trong kết quả `search_documents` của câu hỏi này -- không tự đặt số, không trích dẫn bằng chunk_id hay tên chương. Số trích dẫn ở các câu trả lời trước trong cuộc trò chuyện không còn giá trị.
 """
 
 
@@ -112,9 +113,9 @@ class DocumentQAAgent:
     def __init__(self, es, embed_model, reranker, google_api_key=None, model=GEMINI_MODEL, retrieval_params=None):
         api_key = google_api_key or os.environ.get("GOOGLE_API_KEY")
         if not api_key:
-            raise RuntimeError(
-                "Chưa có GOOGLE_API_KEY trong biến môi trường/.env. "
-                "Lấy API key tại https://aistudio.google.com/apikey"
+            raise AppError(
+                "Chưa có GOOGLE_API_KEY.",
+                "Lấy API key tại https://aistudio.google.com/apikey rồi điền vào file .env.",
             )
         params = retrieval_params or RetrievalParams()
         self.retrieval_params = params
@@ -143,6 +144,11 @@ class DocumentQAAgent:
                     new = [c for c in ranked if c["hit"]["_source"]["chunk_id"] not in ctx.seen_chunk_ids]
                     for c in new:
                         ctx.seen_chunk_ids.add(c["hit"]["_source"]["chunk_id"])
+                    # Citation numbers run across ALL searches of this question (1, 2,
+                    # 3, ...), so [n] in the answer always means exactly one passage.
+                    # Assigned under the lock: parallel searches never share a number.
+                    for offset, c in enumerate(new, start=1):
+                        c["citation"] = len(ctx.sources) + offset
                     ctx.calls.append({"query": query, "num_hits": len(new)})
                     ctx.sources.extend(new)
                 return new
@@ -152,7 +158,7 @@ class DocumentQAAgent:
                 {"reranked": [c["hit"]["_source"]["chunk_id"] for c in ranked]},
                 dedup,
                 lambda new: {
-                    "kept": [c["hit"]["_source"]["chunk_id"] for c in new],
+                    "kept": {c["citation"]: c["hit"]["_source"]["chunk_id"] for c in new},
                     "dropped_already_seen": [
                         c["hit"]["_source"]["chunk_id"] for c in ranked if c not in new
                     ],
@@ -160,11 +166,19 @@ class DocumentQAAgent:
             )
 
             if not new_results:
-                return "(Không có đoạn mới nào -- các đoạn khớp với truy vấn này đã được tìm thấy ở lần tìm kiếm trước.)"
+                return (
+                    "(Không có đoạn mới nào -- các đoạn khớp với truy vấn này đã có trong kết quả "
+                    "các lần tìm kiếm trước; vẫn trích dẫn chúng bằng số cũ.)"
+                )
             return build_context(new_results)
 
         self.model_name = model
-        llm = ChatGoogleGenerativeAI(model=model, temperature=settings.llm_temperature, google_api_key=api_key)
+        # timeout: per request. max_retries: total attempts; the Gemini SDK retries
+        # 408/429/5xx and network errors with exponential backoff + jitter.
+        llm = ChatGoogleGenerativeAI(
+            model=model, temperature=settings.llm_temperature, google_api_key=api_key,
+            timeout=settings.llm_timeout, max_retries=settings.llm_max_retries,
+        )
         # run_name: shows up as e.g. "gemini-2.5-flash" in the trace instead of the class name.
         llm_with_tools = llm.bind_tools([search_documents]).with_config(run_name=model)
 
@@ -182,7 +196,13 @@ class DocumentQAAgent:
         self.graph = graph_builder.compile()
 
     def _run_config(self, ctx: RunContext, history, handler):
-        config = {"configurable": {"run_context": ctx}, "run_name": TRACE_NAME}
+        # recursion_limit caps the agent <-> tools loop, so a model that keeps searching
+        # without answering fails with a clear error instead of running indefinitely.
+        config = {
+            "configurable": {"run_context": ctx},
+            "run_name": TRACE_NAME,
+            "recursion_limit": settings.agent_recursion_limit,
+        }
         if handler is None:
             return config
 
@@ -231,10 +251,13 @@ class DocumentQAAgent:
         book_id=None searches the whole library; otherwise only that document.
         history: earlier chat turns as [{"role": "user"|"assistant", "content": str}, ...]."""
         ctx = RunContext(book_id=book_id, book_title=book_title)
-        result = self.graph.invoke(
-            self._initial_state(query_text, ctx.book_title, history),
-            config=self._run_config(ctx, history, make_callback_handler()),
-        )
+        try:
+            result = self.graph.invoke(
+                self._initial_state(query_text, ctx.book_title, history),
+                config=self._run_config(ctx, history, make_callback_handler()),
+            )
+        except Exception as e:
+            raise explain_error(e) from e
         final_answer = extract_text(result["messages"][-1].content)
         return final_answer, ctx.sources, ctx.calls
 
@@ -255,25 +278,32 @@ class DocumentQAAgent:
         the generator runs (readable live, e.g. after each "tools" update) and hold the
         complete results once it's exhausted.
         history: earlier chat turns as [{"role": "user"|"assistant", "content": str}, ...].
+
+        Any failure (Elasticsearch down, Gemini quota/timeout, out of memory, too many
+        search rounds, ...) is raised as an errors.AppError with a user-readable
+        message; the original exception is chained for the logs.
         """
         initial_state = self._initial_state(query_text, ctx.book_title, history)
-        for mode, payload in self.graph.stream(
-            initial_state,
-            config=self._run_config(ctx, history, make_callback_handler()),
-            stream_mode=["updates", "messages"],
-        ):
-            if mode == "messages":
-                chunk, metadata = payload
-                # Only incremental LLM output from the agent node -- skips ToolMessages
-                # and any non-chunk full message, which the "update" event covers.
-                if metadata.get("langgraph_node") != "agent" or not isinstance(chunk, AIMessageChunk):
-                    continue
-                text = extract_text(chunk.content)
-                if text:
-                    yield {"type": "token", "text": text}
-            else:
-                for node_name, node_output in payload.items():
-                    yield {"type": "update", "node": node_name, "messages": node_output["messages"]}
+        try:
+            for mode, payload in self.graph.stream(
+                initial_state,
+                config=self._run_config(ctx, history, make_callback_handler()),
+                stream_mode=["updates", "messages"],
+            ):
+                if mode == "messages":
+                    chunk, metadata = payload
+                    # Only incremental LLM output from the agent node -- skips ToolMessages
+                    # and any non-chunk full message, which the "update" event covers.
+                    if metadata.get("langgraph_node") != "agent" or not isinstance(chunk, AIMessageChunk):
+                        continue
+                    text = extract_text(chunk.content)
+                    if text:
+                        yield {"type": "token", "text": text}
+                else:
+                    for node_name, node_output in payload.items():
+                        yield {"type": "update", "node": node_name, "messages": node_output["messages"]}
+        except Exception as e:
+            raise explain_error(e) from e
 
 
 if __name__ == "__main__":
@@ -300,5 +330,5 @@ if __name__ == "__main__":
             print(f"  - {src['chunk_id']} (Chapter {src['chapter_title']}, rerank_score={c['rerank_score']:.4f})")
 
     # Langfuse sends traces in the background in batches -- send what's left before
-    # this short-lived script exits (the long-running Streamlit app doesn't need this).
+    # this short-lived script exits (the API flushes on shutdown).
     flush()

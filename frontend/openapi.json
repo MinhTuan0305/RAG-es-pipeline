@@ -1,0 +1,1741 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Document QA API",
+    "version": "1.0"
+  },
+  "paths": {
+    "/api/health": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Health",
+        "operationId": "health_api_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/schema/events": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "SSE event models (documentation only)",
+        "description": "Exists so the SSE event models appear in the OpenAPI schema, for frontend type\ngeneration. Returns an example; the real events come from /api/chat and\n/api/jobs/{id}/events.",
+        "operationId": "event_schemas_api_schema_events_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventSchemas"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/conversations": {
+      "get": {
+        "tags": [
+          "conversations"
+        ],
+        "summary": "Conversations",
+        "operationId": "conversations_api_conversations_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ConversationSummary"
+                  },
+                  "title": "Response Conversations Api Conversations Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/conversations/{conversation_id}": {
+      "get": {
+        "tags": [
+          "conversations"
+        ],
+        "summary": "Conversation",
+        "operationId": "conversation_api_conversations__conversation_id__get",
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Conversation Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "conversations"
+        ],
+        "summary": "Remove Conversation",
+        "operationId": "remove_conversation_api_conversations__conversation_id__delete",
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Conversation Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/chat": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Chat",
+        "description": "Ask one question. Streams: run_started, then tool_call / tool_result /\nanswer_reset / token while the agent works, then sources and done -- or error.\nClosing the connection stops the run; the partial answer is saved as stopped.",
+        "operationId": "chat_api_chat_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "SSE stream of ChatEvent (see GET /api/schema/events)",
+            "content": {
+              "text/event-stream": {}
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/documents": {
+      "get": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "Documents",
+        "operationId": "documents_api_documents_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DocumentSummary"
+                  },
+                  "type": "array",
+                  "title": "Response Documents Api Documents Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/documents/{book_id}": {
+      "delete": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "Remove Document",
+        "operationId": "remove_document_api_documents__book_id__delete",
+        "parameters": [
+          {
+            "name": "book_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Book Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResult"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/documents/parse": {
+      "post": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "Parse",
+        "description": "Step 1 of adding a document: duplicate checks + Docling parse. Returns the\nreview data (heading tree, tables) under a parse_id, or a duplicate notice.\nPass replace_book_id to continue past a duplicate by replacing that document.",
+        "operationId": "parse_api_documents_parse_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_parse_api_documents_parse_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParseResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request Entity Too Large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/documents/index": {
+      "post": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "Index",
+        "description": "Step 2: chunk + embed + index the reviewed document as a background job.\nFollow it with GET /api/jobs/{job_id}/events.",
+        "operationId": "index_api_documents_index_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IndexRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStarted"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/jobs/{job_id}": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Job Info",
+        "operationId": "job_info_api_jobs__job_id__get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobInfo"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/jobs/{job_id}/events": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Job Events",
+        "description": "Every event of the job (progress, retry, then done or error), each with an id.\nReconnecting -- EventSource does it automatically with Last-Event-ID -- resumes\nafter the last event received, so nothing is missed or repeated. The stream ends\nafter the final event.",
+        "operationId": "job_events_api_jobs__job_id__events_get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Only events with an id above this",
+              "default": 0,
+              "title": "After"
+            },
+            "description": "Only events with an id above this"
+          },
+          {
+            "name": "last-event-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last-Event-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream of JobEvent (see GET /api/schema/events)",
+            "content": {
+              "text/event-stream": {}
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AnswerReset": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "answer_reset",
+            "title": "Type",
+            "default": "answer_reset"
+          }
+        },
+        "type": "object",
+        "title": "AnswerReset",
+        "description": "The text streamed so far was a preamble before a search, not the answer:\nclear it."
+      },
+      "Body_parse_api_documents_parse_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          },
+          "replace_book_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replace Book Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_parse_api_documents_parse_post"
+      },
+      "ChatDone": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "done",
+            "title": "Type",
+            "default": "done"
+          },
+          "answer": {
+            "type": "string",
+            "title": "Answer"
+          },
+          "stopped": {
+            "type": "boolean",
+            "title": "Stopped",
+            "default": false
+          },
+          "cited": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Cited",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "answer"
+        ],
+        "title": "ChatDone",
+        "description": "The final answer, citations cleaned up (normalized, made-up numbers removed):\nit replaces the streamed text. `cited` = the citation numbers it uses."
+      },
+      "ChatRequest": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Message"
+          },
+          "conversation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Id"
+          },
+          "book_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Book Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "title": "ChatRequest"
+      },
+      "ConversationDetail": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            },
+            "type": "array",
+            "title": "Messages"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "messages"
+        ],
+        "title": "ConversationDetail"
+      },
+      "ConversationSummary": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "updated_at"
+        ],
+        "title": "ConversationSummary"
+      },
+      "DeleteResult": {
+        "properties": {
+          "deleted_chunks": {
+            "type": "integer",
+            "title": "Deleted Chunks"
+          }
+        },
+        "type": "object",
+        "required": [
+          "deleted_chunks"
+        ],
+        "title": "DeleteResult"
+      },
+      "DocumentSummary": {
+        "properties": {
+          "book_id": {
+            "type": "string",
+            "title": "Book Id"
+          },
+          "book_title": {
+            "type": "string",
+            "title": "Book Title"
+          },
+          "num_chunks": {
+            "type": "integer",
+            "title": "Num Chunks"
+          },
+          "num_tables": {
+            "type": "integer",
+            "title": "Num Tables",
+            "default": 0
+          },
+          "source_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source File"
+          },
+          "uploaded_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uploaded At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "book_id",
+          "book_title",
+          "num_chunks"
+        ],
+        "title": "DocumentSummary"
+      },
+      "ErrorBody": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hint"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "title": "ErrorBody",
+        "description": "Error response of every endpoint, and the `error` SSE event's payload."
+      },
+      "ErrorEvent": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hint"
+          },
+          "type": {
+            "type": "string",
+            "const": "error",
+            "title": "Type",
+            "default": "error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "title": "ErrorEvent"
+      },
+      "EventSchemas": {
+        "properties": {
+          "chat": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RunStarted"
+              },
+              {
+                "$ref": "#/components/schemas/ToolCall"
+              },
+              {
+                "$ref": "#/components/schemas/ToolResult"
+              },
+              {
+                "$ref": "#/components/schemas/AnswerReset"
+              },
+              {
+                "$ref": "#/components/schemas/Token"
+              },
+              {
+                "$ref": "#/components/schemas/Sources"
+              },
+              {
+                "$ref": "#/components/schemas/ChatDone"
+              },
+              {
+                "$ref": "#/components/schemas/ErrorEvent"
+              }
+            ],
+            "title": "Chat",
+            "discriminator": {
+              "propertyName": "type",
+              "mapping": {
+                "answer_reset": "#/components/schemas/AnswerReset",
+                "done": "#/components/schemas/ChatDone",
+                "error": "#/components/schemas/ErrorEvent",
+                "run_started": "#/components/schemas/RunStarted",
+                "sources": "#/components/schemas/Sources",
+                "token": "#/components/schemas/Token",
+                "tool_call": "#/components/schemas/ToolCall",
+                "tool_result": "#/components/schemas/ToolResult"
+              }
+            }
+          },
+          "job": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Progress"
+              },
+              {
+                "$ref": "#/components/schemas/Retry"
+              },
+              {
+                "$ref": "#/components/schemas/JobDone"
+              },
+              {
+                "$ref": "#/components/schemas/ErrorEvent"
+              }
+            ],
+            "title": "Job",
+            "discriminator": {
+              "propertyName": "type",
+              "mapping": {
+                "done": "#/components/schemas/JobDone",
+                "error": "#/components/schemas/ErrorEvent",
+                "progress": "#/components/schemas/Progress",
+                "retry": "#/components/schemas/Retry"
+              }
+            }
+          }
+        },
+        "type": "object",
+        "required": [
+          "chat",
+          "job"
+        ],
+        "title": "EventSchemas",
+        "description": "Not an endpoint payload: lists the SSE event models so they are part of the\nOpenAPI schema (for frontend type generation)."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "Health": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded"
+            ],
+            "title": "Status"
+          },
+          "elasticsearch": {
+            "type": "boolean",
+            "title": "Elasticsearch"
+          },
+          "models_loaded": {
+            "type": "boolean",
+            "title": "Models Loaded"
+          },
+          "llm_key_configured": {
+            "type": "boolean",
+            "title": "Llm Key Configured"
+          },
+          "tracing_enabled": {
+            "type": "boolean",
+            "title": "Tracing Enabled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "elasticsearch",
+          "models_loaded",
+          "llm_key_configured",
+          "tracing_enabled"
+        ],
+        "title": "Health"
+      },
+      "IndexRequest": {
+        "properties": {
+          "parse_id": {
+            "type": "string",
+            "title": "Parse Id"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "author": {
+            "type": "string",
+            "title": "Author",
+            "default": ""
+          },
+          "excluded_table_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Excluded Table Ids",
+            "default": []
+          },
+          "replace_book_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replace Book Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "parse_id",
+          "title"
+        ],
+        "title": "IndexRequest"
+      },
+      "JobDone": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "done",
+            "title": "Type",
+            "default": "done"
+          },
+          "book_id": {
+            "type": "string",
+            "title": "Book Id"
+          },
+          "book_title": {
+            "type": "string",
+            "title": "Book Title"
+          },
+          "chunks": {
+            "type": "integer",
+            "title": "Chunks"
+          },
+          "table_chunks": {
+            "type": "integer",
+            "title": "Table Chunks"
+          },
+          "replaced_chunks": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replaced Chunks"
+          }
+        },
+        "type": "object",
+        "required": [
+          "book_id",
+          "book_title",
+          "chunks",
+          "table_chunks"
+        ],
+        "title": "JobDone"
+      },
+      "JobInfo": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "title": "Job Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "done",
+              "error"
+            ],
+            "title": "Status"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "events": {
+            "type": "integer",
+            "title": "Events"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobDone"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "job_id",
+          "kind",
+          "status",
+          "created_at",
+          "events"
+        ],
+        "title": "JobInfo"
+      },
+      "JobStarted": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "title": "Job Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "job_id"
+        ],
+        "title": "JobStarted"
+      },
+      "Message": {
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "user",
+              "assistant"
+            ],
+            "title": "Role"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "tool_calls": {
+            "items": {
+              "$ref": "#/components/schemas/ToolCallRecord"
+            },
+            "type": "array",
+            "title": "Tool Calls",
+            "default": []
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRecord"
+            },
+            "type": "array",
+            "title": "Sources",
+            "default": []
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope"
+          },
+          "error": {
+            "type": "boolean",
+            "title": "Error",
+            "default": false
+          },
+          "stopped": {
+            "type": "boolean",
+            "title": "Stopped",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "role",
+          "content"
+        ],
+        "title": "Message"
+      },
+      "ParseResult": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "duplicate"
+            ],
+            "title": "Status"
+          },
+          "match": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "file",
+                  "content"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Match"
+          },
+          "existing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DocumentSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "parse_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parse Id"
+          },
+          "review": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ParseReview"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "ParseResult",
+        "description": "status \"ready\": parse_id + review. status \"duplicate\": `existing` is the\nalready-indexed copy; match \"file\" = same bytes (not parsed: re-send with\nreplace_book_id to go on), match \"content\" = same text (parsed: review included,\nindex with replace_book_id to replace the old copy)."
+      },
+      "ParseReview": {
+        "properties": {
+          "metadata": {
+            "$ref": "#/components/schemas/ParsedMetadata"
+          },
+          "stats": {
+            "$ref": "#/components/schemas/TreeStats"
+          },
+          "tree": {
+            "$ref": "#/components/schemas/TreeNode"
+          },
+          "tables": {
+            "items": {
+              "$ref": "#/components/schemas/TableInfo"
+            },
+            "type": "array",
+            "title": "Tables"
+          }
+        },
+        "type": "object",
+        "required": [
+          "metadata",
+          "stats",
+          "tree",
+          "tables"
+        ],
+        "title": "ParseReview"
+      },
+      "ParsedMetadata": {
+        "properties": {
+          "book_id": {
+            "type": "string",
+            "title": "Book Id"
+          },
+          "book_title": {
+            "type": "string",
+            "title": "Book Title"
+          },
+          "author": {
+            "type": "string",
+            "title": "Author",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "book_id",
+          "book_title"
+        ],
+        "title": "ParsedMetadata"
+      },
+      "Progress": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "progress",
+            "title": "Type",
+            "default": "progress"
+          },
+          "stage": {
+            "type": "string",
+            "enum": [
+              "prepare",
+              "chunk",
+              "embed",
+              "index",
+              "replace",
+              "done"
+            ],
+            "title": "Stage"
+          },
+          "value": {
+            "type": "number",
+            "title": "Value"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "done": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Done"
+          },
+          "total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "stage",
+          "value",
+          "text"
+        ],
+        "title": "Progress"
+      },
+      "Retry": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "retry",
+            "title": "Type",
+            "default": "retry"
+          },
+          "batch_size": {
+            "type": "integer",
+            "title": "Batch Size"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          }
+        },
+        "type": "object",
+        "required": [
+          "batch_size",
+          "text"
+        ],
+        "title": "Retry"
+      },
+      "RunStarted": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "run_started",
+            "title": "Type",
+            "default": "run_started"
+          },
+          "conversation_id": {
+            "type": "string",
+            "title": "Conversation Id"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "type": "object",
+        "required": [
+          "conversation_id"
+        ],
+        "title": "RunStarted"
+      },
+      "SourceRecord": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "title": "Type",
+            "default": "paragraph"
+          },
+          "book_title": {
+            "type": "string",
+            "title": "Book Title"
+          },
+          "location": {
+            "type": "string",
+            "title": "Location"
+          },
+          "chunk_id": {
+            "type": "string",
+            "title": "Chunk Id"
+          },
+          "rerank_score": {
+            "type": "number",
+            "title": "Rerank Score"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "citation": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Citation"
+          },
+          "cited": {
+            "type": "boolean",
+            "title": "Cited",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "book_title",
+          "location",
+          "chunk_id",
+          "rerank_score",
+          "text"
+        ],
+        "title": "SourceRecord"
+      },
+      "Sources": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "sources",
+            "title": "Type",
+            "default": "sources"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRecord"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "Sources",
+        "description": "Passages found by a search round, sent right away (citations in the streaming\nanswer can be shown immediately). Each event ADDS items; numbers keep increasing."
+      },
+      "TableInfo": {
+        "properties": {
+          "table_id": {
+            "type": "string",
+            "title": "Table Id"
+          },
+          "caption": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Caption"
+          },
+          "path": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Path"
+          },
+          "n_rows": {
+            "type": "integer",
+            "title": "N Rows"
+          },
+          "n_cols": {
+            "type": "integer",
+            "title": "N Cols"
+          },
+          "markdown": {
+            "type": "string",
+            "title": "Markdown"
+          }
+        },
+        "type": "object",
+        "required": [
+          "table_id",
+          "path",
+          "n_rows",
+          "n_cols",
+          "markdown"
+        ],
+        "title": "TableInfo"
+      },
+      "Token": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "token",
+            "title": "Type",
+            "default": "token"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          }
+        },
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "title": "Token"
+      },
+      "ToolCall": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "tool_call",
+            "title": "Type",
+            "default": "tool_call"
+          },
+          "step": {
+            "type": "integer",
+            "title": "Step"
+          },
+          "query": {
+            "type": "string",
+            "title": "Query"
+          }
+        },
+        "type": "object",
+        "required": [
+          "step",
+          "query"
+        ],
+        "title": "ToolCall"
+      },
+      "ToolCallRecord": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "title": "Query"
+          },
+          "num_hits": {
+            "type": "integer",
+            "title": "Num Hits"
+          }
+        },
+        "type": "object",
+        "required": [
+          "query",
+          "num_hits"
+        ],
+        "title": "ToolCallRecord"
+      },
+      "ToolResult": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "tool_result",
+            "title": "Type",
+            "default": "tool_result"
+          },
+          "query": {
+            "type": "string",
+            "title": "Query"
+          },
+          "num_hits": {
+            "type": "integer",
+            "title": "Num Hits"
+          }
+        },
+        "type": "object",
+        "required": [
+          "query",
+          "num_hits"
+        ],
+        "title": "ToolResult"
+      },
+      "TreeNode": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "depth": {
+            "type": "integer",
+            "title": "Depth"
+          },
+          "n_paragraphs": {
+            "type": "integer",
+            "title": "N Paragraphs"
+          },
+          "table_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Table Ids",
+            "default": []
+          },
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/TreeNode"
+            },
+            "type": "array",
+            "title": "Children",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "title",
+          "depth",
+          "n_paragraphs"
+        ],
+        "title": "TreeNode"
+      },
+      "TreeStats": {
+        "properties": {
+          "headings": {
+            "type": "integer",
+            "title": "Headings"
+          },
+          "paragraphs": {
+            "type": "integer",
+            "title": "Paragraphs"
+          },
+          "tables": {
+            "type": "integer",
+            "title": "Tables"
+          }
+        },
+        "type": "object",
+        "required": [
+          "headings",
+          "paragraphs",
+          "tables"
+        ],
+        "title": "TreeStats"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}

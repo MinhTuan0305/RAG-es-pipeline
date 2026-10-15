@@ -23,9 +23,15 @@ langchain==1.4.3
 # Document parsing
 docling==2.133.0
 
-# App
-streamlit==1.64.0
+# Backend API (backend/app)
+fastapi==0.142.4
+uvicorn==0.53.0
+sse-starlette==3.5.0
+python-multipart==0.0.32
 python-dotenv==1.2.3
+
+# Tests (backend/tests)
+pytest==9.1.1
 
 # Notebooks (notebook/*.ipynb)
 ipykernel==7.3.0
