@@ -50,6 +50,17 @@ def _float(name: str, default: float) -> float:
         raise ValueError(f"{name} must be a number, got {raw!r}") from None
 
 
+def _bool(name: str, default: bool) -> bool:
+    raw = _raw(name)
+    if raw is None:
+        return default
+    if raw.lower() in {"1", "true", "yes", "on"}:
+        return True
+    if raw.lower() in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true or false, got {raw!r}")
+
+
 def _path(name: str, default: str) -> Path:
     path = Path(_str(name, default))
     return path if path.is_absolute() else PROJECT_DIR / path
@@ -88,6 +99,7 @@ class Settings:
     chunk_overlap_ratio: float
     embed_batch_size: int
     embed_max_length: int
+    embed_context_header: bool  # embed/rerank passages with their "document — location" line
 
     # --- App ---
     history_token_budget: int  # earlier turns sent with a question, in (estimated) tokens; 0 = none
@@ -122,6 +134,7 @@ class Settings:
             chunk_overlap_ratio=_float("CHUNK_OVERLAP_RATIO", 0.15),
             embed_batch_size=_int("EMBED_BATCH_SIZE", 8),
             embed_max_length=_int("EMBED_MAX_LENGTH", 8192),
+            embed_context_header=_bool("EMBED_CONTEXT_HEADER", True),
             history_token_budget=_int("HISTORY_TOKEN_BUDGET", 3000),
             agent_recursion_limit=_int("AGENT_RECURSION_LIMIT", 25),
             chat_db_path=_path("CHAT_DB_PATH", "chat_history.db"),

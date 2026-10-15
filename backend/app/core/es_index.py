@@ -58,6 +58,10 @@ INDEX_MAPPING = {
             "uploaded_at": {"type": "date"},
             "file_hash": {"type": "keyword"},
             "content_hash": {"type": "keyword"},
+            # How the chunk's vectors were computed ("contextual-v1" = with the
+            # document/location header; "plain" or missing = text only), to know
+            # what a re-embed (backend/scripts/reembed.py) still has to update.
+            "embed_format": {"type": "keyword"},
             "embedding": {
                 "type": "dense_vector",
                 "dims": settings.embed_dims,
