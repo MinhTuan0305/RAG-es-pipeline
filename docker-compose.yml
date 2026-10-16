@@ -32,6 +32,28 @@ services:
       elasticsearch:
         condition: service_healthy
 
+  postgres:
+    image: postgres:17-alpine
+    container_name: postgres
+    environment:
+      # Read from .env (see .env.example); the fallbacks are local-development defaults.
+      POSTGRES_USER: ${POSTGRES_USER:-docqa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-docqa}
+      POSTGRES_DB: ${POSTGRES_DB:-docqa}
+    ports:
+      # Host port 55432, not 5432: a PostgreSQL installed directly on the machine
+      # usually holds 5432 already. Change with POSTGRES_PORT (and DATABASE_URL).
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
 volumes:
   esdata:
     name: document-qa-esdata
+  pgdata:
+    name: document-qa-pgdata

@@ -255,6 +255,7 @@ class EventSchemas(BaseModel):
 class Health(BaseModel):
     status: Literal["ok", "degraded"]
     elasticsearch: bool
+    database: bool
     models_loaded: bool
     llm_key_configured: bool
     tracing_enabled: bool

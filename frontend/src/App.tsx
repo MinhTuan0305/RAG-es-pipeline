@@ -97,6 +97,8 @@ function HealthBanner() {
   let message: string | null = null;
   if (unreachable) {
     message = "Không kết nối được tới backend. Kiểm tra backend đã chạy chưa (cổng 8000).";
+  } else if (health && !health.database) {
+    message = "Không kết nối được PostgreSQL (lịch sử chat). Kiểm tra Docker: docker compose up -d";
   } else if (health && !health.elasticsearch) {
     message = "Không kết nối được Elasticsearch. Kiểm tra Docker: docker compose up -d";
   } else if (health && !health.llm_key_configured) {

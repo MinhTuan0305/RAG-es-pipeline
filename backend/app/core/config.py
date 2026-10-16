@@ -61,11 +61,6 @@ def _bool(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be true or false, got {raw!r}")
 
 
-def _path(name: str, default: str) -> Path:
-    path = Path(_str(name, default))
-    return path if path.is_absolute() else PROJECT_DIR / path
-
-
 @dataclass(frozen=True)
 class Settings:
     # --- Elasticsearch ---
@@ -104,7 +99,7 @@ class Settings:
     # --- App ---
     history_token_budget: int  # earlier turns sent with a question, in (estimated) tokens; 0 = none
     agent_recursion_limit: int  # max graph steps per question (one search round = 2 steps)
-    chat_db_path: Path
+    database_url: str  # chat history DB (SQLAlchemy URL): PostgreSQL, or sqlite:///... for tests
     trace_name: str
 
     @classmethod
@@ -137,7 +132,10 @@ class Settings:
             embed_context_header=_bool("EMBED_CONTEXT_HEADER", True),
             history_token_budget=_int("HISTORY_TOKEN_BUDGET", 3000),
             agent_recursion_limit=_int("AGENT_RECURSION_LIMIT", 25),
-            chat_db_path=_path("CHAT_DB_PATH", "chat_history.db"),
+            # Matches the postgres service in docker-compose.yml (local-only port). 127.0.0.1,
+            # not "localhost": that resolves to ::1 first, where Docker Desktop on Windows can
+            # leave the connection hanging instead of refusing it.
+            database_url=_str("DATABASE_URL", "postgresql+psycopg://docqa:docqa@127.0.0.1:55432/docqa"),
             trace_name=_str("TRACE_NAME", "document-qa"),
         )
 
@@ -153,6 +151,8 @@ class Settings:
         for name in positive:
             if getattr(self, name) <= 0:
                 errors.append(f"{name.upper()} must be > 0 (got {getattr(self, name)})")
+        if not self.database_url.startswith(("postgresql", "sqlite")):
+            errors.append("DATABASE_URL must be a postgresql+psycopg://... (or sqlite:///...) URL")
         if self.es_max_retries < 0:
             errors.append(f"ES_MAX_RETRIES must be >= 0 (got {self.es_max_retries})")
         if self.history_token_budget < 0:
