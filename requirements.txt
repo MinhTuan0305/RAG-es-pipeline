@@ -30,6 +30,11 @@ sse-starlette==3.5.0
 python-multipart==0.0.32
 python-dotenv==1.2.3
 
+# Chat history database (PostgreSQL) + migrations
+SQLAlchemy==2.0.54
+psycopg[binary]==3.3.6
+alembic==1.20.0
+
 # Tests (backend/tests)
 pytest==9.1.1
 

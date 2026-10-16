@@ -361,6 +361,8 @@ export interface components {
             status: "ok" | "degraded";
             /** Elasticsearch */
             elasticsearch: boolean;
+            /** Database */
+            database: boolean;
             /** Models Loaded */
             models_loaded: boolean;
             /** Llm Key Configured */

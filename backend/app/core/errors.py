@@ -75,11 +75,22 @@ def _short(exc, limit=300) -> str:
     return text[:limit] + ("..." if len(text) > limit else "")
 
 
+def _safe_db_url() -> str:
+    """DATABASE_URL without its password, for messages."""
+    from sqlalchemy.engine import make_url
+
+    try:
+        return make_url(settings.database_url).render_as_string(hide_password=True)
+    except Exception:  # noqa: BLE001
+        return "DATABASE_URL"
+
+
 def explain_error(exc: BaseException) -> AppError:
     """Map any exception to an AppError. Looks through the whole cause chain, since
     libraries wrap the interesting error (e.g. LangChain wraps Google's ClientError)."""
     import elasticsearch
     import httpx
+    import sqlalchemy.exc
     from google.genai import errors as genai_errors
     from langgraph.errors import GraphRecursionError
 
@@ -95,6 +106,13 @@ def explain_error(exc: BaseException) -> AppError:
                 "Agent đã tìm kiếm quá nhiều bước mà vẫn chưa đưa ra được câu trả lời.",
                 "Thử hỏi cụ thể hơn hoặc tách thành nhiều câu hỏi nhỏ. "
                 f"(Giới hạn hiện tại: AGENT_RECURSION_LIMIT={settings.agent_recursion_limit})",
+            )
+
+        if isinstance(e, sqlalchemy.exc.OperationalError):
+            return AppError(
+                f"Không kết nối được cơ sở dữ liệu lịch sử chat ({_safe_db_url()}).",
+                "Kiểm tra PostgreSQL đã chạy chưa: `docker compose up -d` trong thư mục project, "
+                "và DATABASE_URL trong .env khớp với POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB.",
             )
 
         if isinstance(e, elasticsearch.ConnectionTimeout):

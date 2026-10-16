@@ -59,6 +59,9 @@ def create_app(resources_factory=load_resources) -> FastAPI:
         from app.core.tracing import flush
 
         flush()  # send the last Langfuse traces before exiting
+        from app.core.chat_store import dispose
+
+        dispose()  # close the database connection pool
 
     app = FastAPI(title="Document QA API", version="1.0", lifespan=lifespan)
 

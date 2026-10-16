@@ -955,6 +955,10 @@
             "type": "boolean",
             "title": "Elasticsearch"
           },
+          "database": {
+            "type": "boolean",
+            "title": "Database"
+          },
           "models_loaded": {
             "type": "boolean",
             "title": "Models Loaded"
@@ -972,6 +976,7 @@
         "required": [
           "status",
           "elasticsearch",
+          "database",
           "models_loaded",
           "llm_key_configured",
           "tracing_enabled"

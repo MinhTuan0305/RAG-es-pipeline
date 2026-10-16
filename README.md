@@ -3,8 +3,9 @@
 Chatbot trả lời câu hỏi dựa trên kho tài liệu của bạn: upload PDF / DOCX / HTML / Markdown, hệ thống tách nội dung (kể cả bảng), embed bằng **bge-m3** (dense + sparse), lưu vào **Elasticsearch**, tìm kiếm hybrid + rerank (**bge-reranker-v2-m3**) và trả lời bằng agent **LangGraph + Gemini**.
 
 ```
-Trình duyệt ─► Frontend React (:5173) ─/api─► Backend FastAPI (:8000) ─► Elasticsearch (:9200)
-                                              model, agent, SQLite         └─► Gemini, Langfuse
+Trình duyệt ─► Frontend React (:5173) ─/api─► Backend FastAPI (:8000) ─┬─► Elasticsearch (:9200)  tài liệu
+                                              model, agent                  ├─► PostgreSQL (:55432)    lịch sử chat
+                                                                            └─► Gemini, Langfuse
 ```
 
 Câu trả lời và tiến độ embed được đẩy về trình duyệt qua **SSE** (Server-Sent Events).
@@ -12,7 +13,7 @@ Câu trả lời và tiến độ embed được đẩy về trình duyệt qua 
 ## Yêu cầu
 
 - Python 3.10+, Node.js 20+
-- Docker (Elasticsearch + Kibana)
+- Docker (Elasticsearch + Kibana + PostgreSQL)
 - GPU NVIDIA (khuyến nghị; không có GPU vẫn chạy được trên CPU nhưng chậm)
 - Google API key cho Gemini: https://aistudio.google.com/apikey
 
@@ -31,12 +32,12 @@ copy .env.example .env          # Linux/macOS: cp .env.example .env
 cd frontend && npm install
 ```
 
-Mở `.env`, điền `GOOGLE_API_KEY` (bắt buộc) và key Langfuse nếu muốn tracing. Các tham số khác (model, timeout, số kết quả tìm kiếm, kích thước chunk...) đều có giá trị mặc định, xem giải thích trong `.env.example`.
+Mở `.env`, điền `GOOGLE_API_KEY` (bắt buộc) và key Langfuse nếu muốn tracing. Thông tin PostgreSQL (`POSTGRES_*`, `DATABASE_URL`) có sẵn giá trị cho máy dev; đổi mật khẩu nếu chạy ở nơi khác. Các tham số khác (model, timeout, số kết quả tìm kiếm, kích thước chunk...) đều có giá trị mặc định, xem giải thích trong `.env.example`.
 
 ## Chạy
 
 ```bash
-docker compose up -d                                  # Elasticsearch :9200, Kibana :5601
+docker compose up -d                                  # Elasticsearch :9200, Kibana :5601, PostgreSQL :55432
 
 cd backend && uvicorn app.main:app --port 8000        # terminal 1: backend (load model ~1 phút)
 cd frontend && npm run dev                            # terminal 2: frontend
@@ -45,12 +46,15 @@ cd frontend && npm run dev                            # terminal 2: frontend
 Mở http://localhost:5173. Lần chạy đầu sẽ tải model từ HuggingFace (vài GB). Kho tài liệu ban đầu trống: vào **Tài liệu** để upload, xem lại cấu trúc và bảng phát hiện được, rồi xác nhận để embed.
 
 - Chỉ chạy **1 worker** uvicorn: mỗi worker load một bản model riêng.
+- Backend tự tạo/cập nhật bảng trong PostgreSQL lúc khởi động (migration Alembic).
 - Tài liệu API (thử trực tiếp được): http://localhost:8000/docs
 
 ## Phát triển
 
 ```bash
-cd backend && python -m pytest -q                     # test backend (chạy trên fake, không cần ES/GPU/Gemini)
+cd backend && python -m pytest -q                     # test backend (chạy trên fake, không cần ES/GPU/Gemini;
+                                                      #   phần test DB chạy thêm trên PostgreSQL nếu đang bật)
+cd backend && alembic revision --autogenerate -m "..." # sau khi đổi bảng trong app/core/chat_store.py: tạo migration mới
 
 python backend/scripts/export_openapi.py              # sau khi đổi schema ở backend:
 cd frontend && npm run gen:api                        #   sinh lại kiểu TypeScript cho frontend
@@ -75,6 +79,13 @@ Thêm field mới vào mapping thì không cần reindex: backend tự cập nh�
 python backend/scripts/reembed.py            # embed lại sang version mới, chuyển alias, giữ bản cũ để rollback
 ```
 
+## Sao lưu lịch sử chat
+
+```bash
+docker exec postgres pg_dump -U docqa docqa > backup.sql          # sao lưu
+docker exec -i postgres psql -U docqa docqa < backup.sql          # khôi phục (vào DB trống)
+```
+
 ## Cấu trúc
 
 | Đường dẫn | Vai trò |
@@ -83,7 +94,8 @@ python backend/scripts/reembed.py            # embed lại sang version mới, c
 | `backend/app/api/` | Endpoint: chat (SSE), cuộc trò chuyện, tài liệu, job (SSE), health |
 | `backend/app/services/` | Logic chat, parse + job embed/index, quản lý job nền |
 | `backend/app/schemas.py` | Request/response và các loại event SSE |
-| `backend/app/core/` | Lõi RAG: agent LangGraph, hybrid search + rerank, Docling, chunking, mapping ES, SQLite, config, lỗi, tracing |
+| `backend/app/core/` | Lõi RAG: agent LangGraph, hybrid search + rerank, Docling, chunking, mapping ES, lịch sử chat (PostgreSQL), config, lỗi, tracing |
+| `backend/migrations/` | Migration Alembic cho bảng lịch sử chat |
 | `backend/scripts/` | `index_admin.py` (quản lý version index), `export_openapi.py` |
 | `backend/tests/` | Test API trên fake |
 | `frontend/src/` | React + TypeScript: trang Trò chuyện, trang Tài liệu, tầng gọi API/SSE |

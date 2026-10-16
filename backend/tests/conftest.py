@@ -112,7 +112,7 @@ def fake_embed(model, chunks, on_progress=None, on_retry=None, batch_size=8, **k
 
 @pytest.fixture
 def fakes(tmp_path, monkeypatch):
-    monkeypatch.setattr(chat_store, "DB_PATH", tmp_path / "chat.db")
+    chat_store.configure(f"sqlite:///{(tmp_path / 'chat.db').as_posix()}")
     es = FakeES()
 
     def fake_index(es_, chunks):
@@ -130,7 +130,8 @@ def fakes(tmp_path, monkeypatch):
         return Resources(es=es, embed_model=object(), reranker=object(), agent=agent,
                          jobs=JobManager(), parses=ParseStore())
 
-    return {"es": es, "agent": agent, "factory": factory}
+    yield {"es": es, "agent": agent, "factory": factory}
+    chat_store.configure(None)  # back to DATABASE_URL, pool closed
 
 
 @pytest.fixture
